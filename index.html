@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jelly Cell Frame — 젤리 세포 프레임</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #faf7f1; cursor: crosshair; }
+  canvas { display: block; }
+  #hint {
+    position: fixed; left: 50%; bottom: 34px; transform: translateX(-50%);
+    font-family: -apple-system, "Malgun Gothic", sans-serif;
+    font-size: 14px; letter-spacing: 0.05em; color: rgba(40,35,30,0.5);
+    pointer-events: none; transition: opacity 1.5s ease;
+  }
+  #err {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    color: #ffdede; font-family: monospace; font-size: 14px; text-align: center; padding: 20px;
+    background: #200; box-sizing: border-box;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">세포 하나 위에서 잠시 멈춰보세요</div>
+<div id="err">d3-delaunay 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인한 뒤 새로고침해주세요.</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3-delaunay@6/dist/d3-delaunay.min.js"></script>
+<script>
+(function () {
+  if (typeof d3 === "undefined" || !d3.Delaunay) {
+    document.getElementById("err").style.display = "flex";
+    return;
+  }
+
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const hintEl = document.getElementById("hint");
+
+  // =========================================================================
+  // 조절용 상수 — 여기 값들을 바꿔가며 느낌을 조정하세요
+  // =========================================================================
+  const CONFIG = {
+    // ── 인터랙션 ──
+    CELL_COUNT: 65,            // 화면을 주도하는 주요 세포 개수
+    SIZE_VARIATION: 0.9,       // 크기 위계 비율. 0=거의 균일, 1=소수의 큰 세포 + 다수의 작은 세포로 위계 극대화
+    ARRIVAL_DWELL_MS: 180,     // 커서가 한 세포 위에서 이만큼(ms) "거의 정지"해야 도착으로 인정 — 인식은 빠르게(0.15~0.2초)
+    STILL_SPEED_PX_S: 40,      // 커서 속도가 이 값(px/초)보다 느려야 "정지"로 간주 — 지나가기만 하면 반응 없음
+    GROW_MS: 3500,             // 부푸는 시간 — 도착은 빨리 알아채도, 부푸는 건 서서히 압력이 차오르듯 느리게(3~4초)
+    SINK_MS: 1000,             // 커서가 떠난 뒤 원래 크기로 가라앉는 시간(ms)
+    INFLATE_AREA_MULT: 7,      // 부푸는 배율 — 완전히 부풀었을 때 목표 면적 = 원래 면적 × 이 값 (약 6~8배)
+    OVERSHOOT_STRENGTH: 0.14,  // 다 부풀었을 때 살짝 튕기는 탄성 오버슛의 세기 (0이면 오버슛 없음)
+    PUSH_RANGE_FRACTION: 0.6,  // 영향 범위 — 부푸는 세포의 압력이 전달되는 거리 = 프레임 크기 × 이 비율
+    BREATHE_SPEED: 0.35,       // 커서가 없을 때 전체 막이 흔들리는 노이즈의 시간 배속
+    TENSION_PERIOD_MS: 9000,   // 세포가 스스로 부풀었다 가라앉는 "긴장" 이벤트의 평균 발생 간격(ms)
+
+    // ── 프레임 ──
+    FRAME_ASPECT: 4 / 3,             // 프레임 비율 — 가로:세로
+    FRAME_CORNER_FRACTION: 0.135,    // 프레임 모서리 r — 짧은 변 대비 모서리 반지름 비율 (약 12~15%)
+
+    // ── 세포 렌더링 ──
+    INK_COLOR: "17,17,17",           // 막(잉크)의 색 RGB — 순수 검정에 가까운 진한 잉크색
+    INSET_RANGE_PX: [0.15, 1.2],     // 틈 두께 — [최소,최대] 세포를 안쪽으로 줄이는 거리(px, 한쪽 기준). 실처럼 가늘게
+    CELL_CORNER_RANGE: [0.55, 0.97], // 세포 모서리 반경 — [부풀 때, 눌릴 때] 변 길이 대비 둥글림 비율(0~1). 클수록 젤리처럼 뭉침
+  };
+
+  // 위 항목들을 보조하는 부수적 상수 (직접 만질 일은 적지만 필요하면 함께 조정)
+  const AUX = {
+    LLOYD_ITERATIONS: 2,        // 초기 배치를 정돈하는 로이드 이완 반복 횟수 — 적을수록 불규칙함이 많이 남음
+    LLOYD_STRENGTH: 0.5,        // 이완 1회당 중심으로 당기는 세기 (큰 세포는 이보다 약하게 적용됨)
+    BREATHE_AMPLITUDE: 1.4,     // 숨쉬기 흔들림의 진폭(px)
+    TREMBLE_EXTRA_JITTER: 4.5,  // 부풀거나 긴장된 정도에 비례해 추가되는 떨림 진폭(px)
+    TENSION_TARGET_AMT: 0.62,   // 자발적 "긴장" 상태가 최대로 도달하는 부푼 정도 (1=커서로 완전히 부푼 상태)
+    TENSION_HOLD_MS: 700,       // 긴장이 정점에서 머무는 시간(ms)
+    TENSION_RISE_MULT: 1.6,     // 긴장이 올라가는 시간 = GROW_MS × 이 값 (커서 인터랙션보다 느리게)
+    TENSION_FALL_MULT: 1.6,     // 긴장이 풀리는 시간 = SINK_MS × 이 값
+    TENSION_MAX_CONCURRENT: 2,  // 동시에 긴장 상태일 수 있는 세포 최대 개수
+    BG_COLOR: "#faf7f1",        // 배경 오프화이트
+
+    FRAME_MARGIN_FRACTION: 0.06,    // 프레임과 화면 가장자리 사이 여백 비율 (짧은 쪽 기준)
+    FRAME_SAMPLES: 64,              // 프레임 둘레를 표본화할 점 개수 (경계 고정점 겸용)
+    EDGE_SMALL_CELL_COUNT: 45,      // 가장자리에 추가로 무리 짓는 작은 세포 개수
+    EDGE_BAND_FRACTION: 0.32,       // "가장자리"로 간주할 바깥쪽 폭 비율
+    EDGE_SMALL_RADIUS_FACTOR: [0.1, 0.32], // 가장자리 작은 세포의 반지름 범위(전체 평균 반지름 대비 배율)
+    JUNCTION_SATELLITE_COUNT: 22,   // 큰 세포 주변(=미래의 접합부 근처)에 붙이는 작은 위성 세포 개수
+    INSET_JITTER_RANGE: [0.7, 1.4], // 틈 두께에 곁들이는 손그림 느낌의 변이 폭
+  };
+
+  // =========================================================================
+  // 유틸리티
+  // =========================================================================
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function mapRange(v, inMin, inMax, outMin, outMax, doClamp) {
+    let t = (v - inMin) / (inMax - inMin);
+    if (doClamp) t = clamp(t, 0, 1);
+    return outMin + (outMax - outMin) * t;
+  }
+  function hashN(n) {
+    const x = Math.sin(n * 127.1) * 43758.5453123;
+    return x - Math.floor(x);
+  }
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i;
+    const a = hashN(i), b = hashN(i + 1);
+    const u = f * f * (3 - 2 * f);
+    return a + (b - a) * u;
+  }
+  function polygonCentroid(pts) {
+    let x = 0, y = 0, a = 0;
+    const n = pts.length;
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = pts[i];
+      const [x1, y1] = pts[(i + 1) % n];
+      const cross = x0 * y1 - x1 * y0;
+      a += cross;
+      x += (x0 + x1) * cross;
+      y += (y0 + y1) * cross;
+    }
+    a *= 0.5;
+    if (Math.abs(a) < 1e-6) {
+      let sx = 0, sy = 0;
+      for (const [px, py] of pts) { sx += px; sy += py; }
+      return [sx / n, sy / n];
+    }
+    return [x / (6 * a), y / (6 * a)];
+  }
+  function normalizePoly(poly) {
+    if (poly.length > 1) {
+      const first = poly[0], last = poly[poly.length - 1];
+      if (Math.abs(first[0] - last[0]) < 1e-6 && Math.abs(first[1] - last[1]) < 1e-6) {
+        return poly.slice(0, -1);
+      }
+    }
+    return poly;
+  }
+  function polygonArea(poly) {
+    const pts = normalizePoly(poly);
+    let a = 0;
+    const n = pts.length;
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = pts[i];
+      const [x1, y1] = pts[(i + 1) % n];
+      a += x0 * y1 - x1 * y0;
+    }
+    return Math.abs(a) / 2;
+  }
+  function polyBounds(pts) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [x, y] of pts) {
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    return { minX, minY, maxX, maxY };
+  }
+  function pointInPolygon(pt, poly) {
+    let inside = false;
+    const n = poly.length;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = poly[i][0], yi = poly[i][1];
+      const xj = poly[j][0], yj = poly[j][1];
+      const hit = (yi > pt[1]) !== (yj > pt[1]) &&
+        pt[0] < ((xj - xi) * (pt[1] - yi)) / (yj - yi) + xi;
+      if (hit) inside = !inside;
+    }
+    return inside;
+  }
+  function vSub(a, b) { return [a[0] - b[0], a[1] - b[1]]; }
+  function vNorm(v) { const l = Math.hypot(v[0], v[1]) || 1e-6; return [v[0] / l, v[1] / l]; }
+  function vDist(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1]); }
+
+  // 시간(초 단위)과 감쇠비로부터 감쇠-스프링 물리 계수(k, c)를 만든다.
+  // periodSec: 대략적인 정착 시간, overshoot: 목표를 지나쳤다 돌아오는 비율(0=오버슛 없음)
+  function springParams(periodSec, overshoot) {
+    let zeta;
+    if (overshoot <= 0.001) {
+      zeta = 1;
+    } else {
+      const lnO = Math.log(overshoot);
+      zeta = -lnO / Math.sqrt(Math.PI * Math.PI + lnO * lnO);
+    }
+    const omega = 4 / (Math.max(zeta, 0.05) * Math.max(periodSec, 0.05));
+    return { k: omega * omega, c: 2 * zeta * omega };
+  }
+  const RISE_SPRING = springParams(CONFIG.GROW_MS / 1000, CONFIG.OVERSHOOT_STRENGTH);
+  const FALL_SPRING = springParams(CONFIG.SINK_MS / 1000, 0);
+
+  function updateAmt(site, target, dt) {
+    const sp = target > site.amt ? RISE_SPRING : FALL_SPRING;
+    const acc = -sp.k * (site.amt - target) - sp.c * site.ampVel;
+    site.ampVel += acc * dt;
+    site.amt += site.ampVel * dt;
+    if (site.amt < -0.08) { site.amt = -0.08; site.ampVel = 0; }
+  }
+
+  // =========================================================================
+  // 상태
+  // =========================================================================
+  let W, H, DPR;
+  let sites = [];
+  let frame = null;         // { x, y, w, h, r, cx, cy } — 고정된 둥근 사각형 프레임
+  let frameAnchors = [];    // 프레임 둘레의 정적인 경계 고정점 { x, y } — 보로노이 경계용, 렌더링 대상 아님
+  let frameR0 = 0;          // 압력 전달 범위 계산용 프레임 특성 반지름
+  let lastT = performance.now();
+  let hoverIndex = -1, dwellTimer = 0, activeCellIndex = -1;
+  let prevFrameX = null, prevFrameY = null;
+  let tensionSlots = [];
+  let nextTensionAt = performance.now() + CONFIG.TENSION_PERIOD_MS * (0.5 + Math.random());
+
+  const pointer = { x: -9999, y: -9999, onScreen: false };
+
+  // =========================================================================
+  // 프레임: 화면 중앙의 4:3 둥근 사각형
+  // =========================================================================
+  function sampleRoundedRectBoundary(x, y, w, h, r, n) {
+    const straightW = w - 2 * r;
+    const straightH = h - 2 * r;
+    const arcLen = (Math.PI / 2) * r;
+    const perimeter = 2 * straightW + 2 * straightH + 4 * arcLen;
+    const corner = (ccx, ccy, a0, a1, t) => {
+      const a = a0 + (a1 - a0) * t;
+      return [ccx + Math.cos(a) * r, ccy + Math.sin(a) * r];
+    };
+    const segments = [
+      { len: straightW, fn: (t) => [x + r + t * straightW, y] },
+      { len: arcLen, fn: (t) => corner(x + w - r, y + r, -Math.PI / 2, 0, t) },
+      { len: straightH, fn: (t) => [x + w, y + r + t * straightH] },
+      { len: arcLen, fn: (t) => corner(x + w - r, y + h - r, 0, Math.PI / 2, t) },
+      { len: straightW, fn: (t) => [x + w - r - t * straightW, y + h] },
+      { len: arcLen, fn: (t) => corner(x + r, y + h - r, Math.PI / 2, Math.PI, t) },
+      { len: straightH, fn: (t) => [x, y + h - r - t * straightH] },
+      { len: arcLen, fn: (t) => corner(x + r, y + r, Math.PI, Math.PI * 1.5, t) },
+    ];
+    const pts = [];
+    for (const seg of segments) {
+      const count = Math.max(2, Math.round(n * (seg.len / perimeter)));
+      for (let i = 0; i < count; i++) pts.push(seg.fn(i / count));
+    }
+    return pts;
+  }
+
+  function generateFrameShape() {
+    const margin = Math.min(W, H) * AUX.FRAME_MARGIN_FRACTION;
+    const availW = W - margin * 2, availH = H - margin * 2;
+    let w, h;
+    if (availW / availH > CONFIG.FRAME_ASPECT) { h = availH; w = h * CONFIG.FRAME_ASPECT; }
+    else { w = availW; h = w / CONFIG.FRAME_ASPECT; }
+    const cx = W / 2, cy = H / 2;
+    const x = cx - w / 2, y = cy - h / 2;
+    const r = Math.min(w, h) * CONFIG.FRAME_CORNER_FRACTION;
+    const pts = sampleRoundedRectBoundary(x, y, w, h, r, AUX.FRAME_SAMPLES);
+    return { x, y, w, h, r, cx, cy, pts };
+  }
+
+  // 캔버스에 실제 둥근 사각형 경로를 만든다 (프레임을 그리거나 클립할 때 사용)
+  function roundedRectPath(f) {
+    const { x, y, w, h, r } = f;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.arcTo(x + w, y, x + w, y + r, r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+    ctx.lineTo(x + r, y + h);
+    ctx.arcTo(x, y + h, x, y + h - r, r);
+    ctx.lineTo(x, y + r);
+    ctx.arcTo(x, y, x + r, y, r);
+    ctx.closePath();
+  }
+
+  // =========================================================================
+  // 초기 배치: 프레임 안에, 크기 편차가 있는 다트 던지기 + 약한 로이드 이완
+  // =========================================================================
+  function generateSeedPoints(framePts) {
+    const n = CONFIG.CELL_COUNT;
+    const area = polygonArea(framePts);
+    const avgR = Math.sqrt(area / n / Math.PI);
+    const bbox = polyBounds(framePts);
+    const list = [];
+    const maxAttempts = n * 120;
+    const powExp = 1 + CONFIG.SIZE_VARIATION * 7;               // 클수록 작은 반지름 쪽으로 강하게 쏠림
+    const ceilingMul = 3.5 * (0.3 + CONFIG.SIZE_VARIATION * 1.3); // 클수록 큰 세포의 상한도 훨씬 커짐
+    let attempts = 0;
+    while (list.length < n && attempts < maxAttempts) {
+      attempts++;
+      const x = bbox.minX + Math.random() * (bbox.maxX - bbox.minX);
+      const y = bbox.minY + Math.random() * (bbox.maxY - bbox.minY);
+      if (!pointInPolygon([x, y], framePts)) continue;
+      const rNorm = Math.pow(Math.random(), powExp);
+      const r = avgR * (0.4 + rNorm * ceilingMul);
+      let ok = true;
+      for (const p of list) {
+        const dx = p.x - x, dy = p.y - y;
+        const minD = (p.r + r) * 0.62;
+        if (dx * dx + dy * dy < minD * minD) { ok = false; break; }
+      }
+      if (ok) list.push({ x, y, r });
+    }
+    return { list, avgR, bbox };
+  }
+
+  function addEdgeClusterCells(list, framePts, cx, cy, R0, avgR, bbox) {
+    let added = 0, attempts = 0;
+    const maxAttempts = AUX.EDGE_SMALL_CELL_COUNT * 80;
+    while (added < AUX.EDGE_SMALL_CELL_COUNT && attempts < maxAttempts) {
+      attempts++;
+      const x = bbox.minX + Math.random() * (bbox.maxX - bbox.minX);
+      const y = bbox.minY + Math.random() * (bbox.maxY - bbox.minY);
+      if (!pointInPolygon([x, y], framePts)) continue;
+      const edgeCloseness = Math.hypot(x - cx, y - cy) / R0;
+      if (edgeCloseness < 1 - AUX.EDGE_BAND_FRACTION) continue;
+      const r = avgR * lerp(AUX.EDGE_SMALL_RADIUS_FACTOR[0], AUX.EDGE_SMALL_RADIUS_FACTOR[1], Math.random());
+      let ok = true;
+      for (const p of list) {
+        const dx = p.x - x, dy = p.y - y;
+        const minD = (p.r + r) * 0.6;
+        if (dx * dx + dy * dy < minD * minD) { ok = false; break; }
+      }
+      if (ok) { list.push({ x, y, r }); added++; }
+    }
+  }
+
+  // 이미 놓인 큰 세포들 옆에 작은 위성 세포를 붙여서, 나중에 그 접합부 근처에
+  // 작은 세포 무리가 생기도록 유도한다.
+  function addJunctionSatellites(list, framePts, avgR) {
+    const bigOnes = list.filter((p) => p.r > avgR * 1.3);
+    let added = 0;
+    for (const big of bigOnes) {
+      if (added >= AUX.JUNCTION_SATELLITE_COUNT) break;
+      const satCount = 1 + Math.floor(Math.random() * 2);
+      for (let s = 0; s < satCount && added < AUX.JUNCTION_SATELLITE_COUNT; s++) {
+        const theta = Math.random() * Math.PI * 2;
+        const r = avgR * lerp(AUX.EDGE_SMALL_RADIUS_FACTOR[0], AUX.EDGE_SMALL_RADIUS_FACTOR[1], Math.random());
+        const d = big.r + r * 1.1;
+        const x = big.x + Math.cos(theta) * d;
+        const y = big.y + Math.sin(theta) * d;
+        if (!pointInPolygon([x, y], framePts)) continue;
+        let ok = true;
+        for (const p of list) {
+          const dx = p.x - x, dy = p.y - y;
+          const minD = (p.r + r) * 0.55;
+          if (dx * dx + dy * dy < minD * minD) { ok = false; break; }
+        }
+        if (ok) { list.push({ x, y, r }); added++; }
+      }
+    }
+  }
+
+  function relax(list, iterations, bounds, avgR) {
+    let pts = list.map((p) => ({ x: p.x, y: p.y, r: p.r }));
+    for (let it = 0; it < iterations; it++) {
+      const del = d3.Delaunay.from(pts, (p) => p.x, (p) => p.y);
+      const vor = del.voronoi(bounds);
+      for (let i = 0; i < pts.length; i++) {
+        const poly = vor.cellPolygon(i);
+        if (!poly) continue;
+        const c = polygonCentroid(normalizePoly(poly));
+        const sizeFactor = clamp(pts[i].r / (avgR * 2.4), 0, 1); // 클수록 1에 가까움 → 덜 이완됨
+        const relaxAmt = AUX.LLOYD_STRENGTH * (1 - sizeFactor * 0.75);
+        pts[i].x += (c[0] - pts[i].x) * relaxAmt;
+        pts[i].y += (c[1] - pts[i].y) * relaxAmt;
+        pts[i].x = clamp(pts[i].x, bounds[0] + 2, bounds[2] - 2);
+        pts[i].y = clamp(pts[i].y, bounds[1] + 2, bounds[3] - 2);
+      }
+    }
+    return pts;
+  }
+
+  function initSites() {
+    const bounds = [0, 0, W, H];
+    frame = generateFrameShape();
+    frameAnchors = frame.pts.map(([x, y]) => ({ x, y }));
+    frameR0 = Math.sqrt(frame.w * frame.h) / 2;
+
+    const { list, avgR, bbox } = generateSeedPoints(frame.pts);
+    addEdgeClusterCells(list, frame.pts, frame.cx, frame.cy, Math.min(frame.w, frame.h) / 2, avgR, bbox);
+    addJunctionSatellites(list, frame.pts, avgR);
+
+    const before = list.map((p) => ({ x: p.x, y: p.y, r: p.r }));
+    const relaxed = relax(before, AUX.LLOYD_ITERATIONS, bounds, avgR);
+
+    // 이완 후 프레임 밖으로 나간 점은 이완 전 위치로 되돌리는 안전장치
+    for (let i = 0; i < relaxed.length; i++) {
+      if (!pointInPolygon([relaxed[i].x, relaxed[i].y], frame.pts)) {
+        relaxed[i].x = before[i].x;
+        relaxed[i].y = before[i].y;
+      }
+    }
+
+    sites = relaxed.map((p, i) => ({
+      idx: i,
+      hx: p.x, hy: p.y,
+      x: p.x, y: p.y,
+      vx: 0, vy: 0,
+      pushX: 0, pushY: 0,
+      amt: 0, ampVel: 0,
+      seed: Math.random() * 1000,
+      baseArea: Math.PI * avgR * avgR,
+      baseRadius: avgR,
+    }));
+
+    // 기준(원래) 면적을 실제 정착된 다이어그램(프레임 경계 고정점 포함)에서 측정
+    const combined = sites.concat(frameAnchors);
+    const del = d3.Delaunay.from(combined, (s) => s.x, (s) => s.y);
+    const vor = del.voronoi(bounds);
+    for (let i = 0; i < sites.length; i++) {
+      const poly = vor.cellPolygon(i);
+      if (poly) {
+        const a = polygonArea(poly);
+        if (a > 1) {
+          sites[i].baseArea = a;
+          sites[i].baseRadius = Math.sqrt(a / Math.PI);
+        }
+      }
+    }
+
+    hoverIndex = -1; dwellTimer = 0; activeCellIndex = -1;
+    tensionSlots = [];
+  }
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W * DPR;
+    canvas.height = H * DPR;
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    initSites();
+  }
+
+  // =========================================================================
+  // 포인터
+  // =========================================================================
+  function setPointer(x, y) { pointer.x = x; pointer.y = y; pointer.onScreen = true; }
+  window.addEventListener("mousemove", (e) => setPointer(e.clientX, e.clientY));
+  window.addEventListener("touchmove", (e) => {
+    if (e.touches[0]) setPointer(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  window.addEventListener("touchstart", (e) => {
+    if (e.touches[0]) setPointer(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  document.addEventListener("mouseleave", () => { pointer.onScreen = false; });
+  window.addEventListener("touchend", () => { pointer.onScreen = false; });
+  window.addEventListener("touchcancel", () => { pointer.onScreen = false; });
+  window.addEventListener("resize", resize);
+
+  function nearestSiteIndex(px, py) {
+    let best = -1, bestD = Infinity;
+    for (let i = 0; i < sites.length; i++) {
+      const dx = sites[i].x - px, dy = sites[i].y - py;
+      const d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  function updateHoverAndDwell(dt) {
+    if (!pointer.onScreen || sites.length === 0) {
+      hoverIndex = -1; dwellTimer = 0; activeCellIndex = -1; prevFrameX = null;
+      return;
+    }
+    const speed = (prevFrameX === null) ? 0 : Math.hypot(pointer.x - prevFrameX, pointer.y - prevFrameY) / Math.max(dt, 0.0001);
+    prevFrameX = pointer.x; prevFrameY = pointer.y;
+
+    const nh = nearestSiteIndex(pointer.x, pointer.y);
+    if (nh !== hoverIndex) {
+      hoverIndex = nh;
+      dwellTimer = 0;
+    } else if (speed < CONFIG.STILL_SPEED_PX_S) {
+      dwellTimer += dt * 1000;
+    } else {
+      dwellTimer = 0;
+    }
+    activeCellIndex = (dwellTimer >= CONFIG.ARRIVAL_DWELL_MS) ? hoverIndex : -1;
+  }
+
+  // =========================================================================
+  // 자발적 "긴장" 이벤트 — 가끔 세포 하나가 스스로 부풀었다 풀림
+  // =========================================================================
+  function updateTension(now) {
+    if (now >= nextTensionAt && tensionSlots.length < AUX.TENSION_MAX_CONCURRENT && sites.length > 0) {
+      const busy = new Set(tensionSlots.map((s) => s.siteIndex));
+      busy.add(activeCellIndex);
+      let idx = -1;
+      for (let tries = 0; tries < 10; tries++) {
+        const cand = Math.floor(Math.random() * sites.length);
+        if (!busy.has(cand)) { idx = cand; break; }
+      }
+      if (idx >= 0) tensionSlots.push({ siteIndex: idx, phase: "rise", phaseStart: now });
+      nextTensionAt = now + CONFIG.TENSION_PERIOD_MS * (0.5 + Math.random());
+    }
+
+    const riseDur = CONFIG.GROW_MS * AUX.TENSION_RISE_MULT;
+    const fallDur = CONFIG.SINK_MS * AUX.TENSION_FALL_MULT;
+    for (let i = tensionSlots.length - 1; i >= 0; i--) {
+      const slot = tensionSlots[i];
+      const elapsed = now - slot.phaseStart;
+      if (slot.phase === "rise" && elapsed >= riseDur) { slot.phase = "hold"; slot.phaseStart = now; }
+      else if (slot.phase === "hold" && elapsed >= AUX.TENSION_HOLD_MS) { slot.phase = "fall"; slot.phaseStart = now; }
+      else if (slot.phase === "fall" && elapsed >= fallDur) { tensionSlots.splice(i, 1); }
+    }
+  }
+
+  function tensionTargetForSite(idx) {
+    for (const slot of tensionSlots) {
+      if (slot.siteIndex === idx) return slot.phase === "fall" ? 0 : AUX.TENSION_TARGET_AMT;
+    }
+    return 0;
+  }
+
+  // =========================================================================
+  // 물리 업데이트
+  // =========================================================================
+  const SPRING_K = 0.14; // 위치 복귀 스프링
+  const DAMPING = 0.78;
+
+  // 활성(부풀거나 긴장 중인) 세포들이 주변에 미치는 압력을 한 점(hx,hy)에서 합산한다.
+  function computePush(hx, hy, pushers) {
+    let px = 0, py = 0;
+    for (const p of pushers) {
+      const dx = hx - p.hx, dy = hy - p.hy;
+      const d = Math.hypot(dx, dy) || 0.0001;
+      if (d < p.influenceR) {
+        const falloff = 0.5 * (1 + Math.cos((Math.PI * d) / p.influenceR));
+        const push = falloff * p.maxPush;
+        px += (dx / d) * push;
+        py += (dy / d) * push;
+      }
+    }
+    return [px, py];
+  }
+
+  function updatePhysics(dt, now, t) {
+    updateHoverAndDwell(dt);
+    updateTension(now);
+
+    for (let i = 0; i < sites.length; i++) {
+      const target = (i === activeCellIndex) ? 1 : tensionTargetForSite(i);
+      updateAmt(sites[i], target, dt);
+    }
+
+    // 압력을 가하는 세포 목록 — 영향 범위는 세포 자기 크기가 아니라 프레임 전체 크기 기준
+    const pushers = [];
+    for (const s of sites) {
+      const amt = Math.max(0, s.amt);
+      if (amt < 0.02) continue;
+      pushers.push({
+        hx: s.hx, hy: s.hy,
+        influenceR: Math.max(1, frameR0 * CONFIG.PUSH_RANGE_FRACTION),
+        maxPush: (Math.sqrt(CONFIG.INFLATE_AREA_MULT) - 1) * s.baseRadius * Math.min(amt, 1.3),
+      });
+    }
+
+    for (const s of sites) {
+      const [px, py] = computePush(s.hx, s.hy, pushers);
+      s.pushX = px; s.pushY = py;
+    }
+
+    for (const s of sites) {
+      const bt = t * CONFIG.BREATHE_SPEED;
+      const breatheX = (noise1(s.seed + bt) * 2 - 1) * AUX.BREATHE_AMPLITUDE;
+      const breatheY = (noise1(s.seed + 500 + bt) * 2 - 1) * AUX.BREATHE_AMPLITUDE;
+      const tremble = Math.max(0, s.amt) * AUX.TREMBLE_EXTRA_JITTER;
+      const trembleX = tremble * (noise1(s.seed + 900 + t * 3) * 2 - 1);
+      const trembleY = tremble * (noise1(s.seed + 1400 + t * 3) * 2 - 1);
+
+      const targetX = s.hx + breatheX + trembleX + s.pushX;
+      const targetY = s.hy + breatheY + trembleY + s.pushY;
+
+      const ax = (targetX - s.x) * SPRING_K;
+      const ay = (targetY - s.y) * SPRING_K;
+      s.vx = (s.vx + ax) * DAMPING;
+      s.vy = (s.vy + ay) * DAMPING;
+      s.x += s.vx;
+      s.y += s.vy;
+    }
+  }
+
+  // =========================================================================
+  // 렌더링: 검은 잉크 프레임 위에, 안쪽으로 살짝 줄인(inset) 오프화이트 젤리 세포를 얹는다.
+  // 접합부의 고임은 별도로 그리지 않고, 큰 모서리 곡률이 겹치는 결과로만 생기게 한다.
+  // =========================================================================
+
+  // 볼록 다각형을 각 변마다 다른 거리(insetArr)만큼 안쪽으로 평행 이동시켜 축소한다.
+  function insetPolygon(pts, insetArr) {
+    const n = pts.length;
+    if (n < 3) return pts;
+    let signedArea2 = 0;
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = pts[i], [x1, y1] = pts[(i + 1) % n];
+      signedArea2 += x0 * y1 - x1 * y0;
+    }
+    const sign = signedArea2 >= 0 ? 1 : -1;
+
+    const offsetLines = [];
+    for (let i = 0; i < n; i++) {
+      const p1 = pts[i], p2 = pts[(i + 1) % n];
+      let dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+      const len = Math.hypot(dx, dy) || 1e-6;
+      dx /= len; dy /= len;
+      const nx = sign > 0 ? -dy : dy;
+      const ny = sign > 0 ? dx : -dx;
+      const d = insetArr[i];
+      offsetLines.push({ px: p1[0] + nx * d, py: p1[1] + ny * d, dx, dy });
+    }
+
+    const result = [];
+    for (let i = 0; i < n; i++) {
+      const a = offsetLines[(i - 1 + n) % n];
+      const b = offsetLines[i];
+      const denom = a.dx * b.dy - a.dy * b.dx;
+      if (Math.abs(denom) < 1e-9) { result.push([b.px, b.py]); continue; }
+      const tt = ((b.px - a.px) * b.dy - (b.py - a.py) * b.dx) / denom;
+      result.push([a.px + a.dx * tt, a.py + a.dy * tt]);
+    }
+    return result;
+  }
+
+  // 다각형의 각 모서리를, 인접한 변 길이에 비례하는(cornerFrac) 큰 곡률로 둥글려
+  // 현재 캔버스 경로에 만든다. cornerFrac이 1에 가까울수록 변의 대부분이 곡선으로 채워져
+  // 젤리처럼 뭉친 모양이 되고, 이웃 세포와 만나는 자리에는 곡선 삼각형(Plateau border)이 저절로 남는다.
+  function buildJellyPolygon(pts, cornerFrac) {
+    const n = pts.length;
+    if (n < 3) { ctx.beginPath(); return; }
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const prev = pts[(i - 1 + n) % n];
+      const cur = pts[i];
+      const next = pts[(i + 1) % n];
+      const toPrev = vNorm(vSub(prev, cur));
+      const toNext = vNorm(vSub(next, cur));
+      const r = cornerFrac * Math.min(vDist(prev, cur), vDist(cur, next)) * 0.48;
+      const a = [cur[0] + toPrev[0] * r, cur[1] + toPrev[1] * r];
+      const b = [cur[0] + toNext[0] * r, cur[1] + toNext[1] * r];
+      if (i === 0) ctx.moveTo(a[0], a[1]); else ctx.lineTo(a[0], a[1]);
+      ctx.quadraticCurveTo(cur[0], cur[1], b[0], b[1]);
+    }
+    ctx.closePath();
+  }
+
+  function drawCell(site, rawPoly) {
+    const pts = normalizePoly(rawPoly);
+    if (pts.length < 3) return;
+
+    const area = polygonArea(rawPoly);
+    const ratio = area / site.baseArea;
+    const inflateNorm = mapRange(ratio, 1, CONFIG.INFLATE_AREA_MULT, 0, 1, true);
+    const compressNorm = mapRange(ratio, 1, 0.35, 0, 1, true);
+
+    const midInset = (CONFIG.INSET_RANGE_PX[0] + CONFIG.INSET_RANGE_PX[1]) / 2;
+    const baseInset = ratio >= 1
+      ? lerp(midInset, CONFIG.INSET_RANGE_PX[0], inflateNorm)
+      : lerp(midInset, CONFIG.INSET_RANGE_PX[1], compressNorm);
+
+    const midCorner = (CONFIG.CELL_CORNER_RANGE[0] + CONFIG.CELL_CORNER_RANGE[1]) / 2;
+    const cornerFrac = ratio >= 1
+      ? lerp(midCorner, CONFIG.CELL_CORNER_RANGE[0], inflateNorm)
+      : lerp(midCorner, CONFIG.CELL_CORNER_RANGE[1], compressNorm);
+
+    // 세포 크기에 비해 값이 너무 크면 도형이 뒤집히므로 안전하게 제한
+    const safeCap = Math.sqrt(area / Math.PI) * 0.46;
+
+    const n = pts.length;
+    const insets = new Array(n);
+    for (let e = 0; e < n; e++) {
+      const jitter = lerp(AUX.INSET_JITTER_RANGE[0], AUX.INSET_JITTER_RANGE[1], hashN(site.seed + e * 13.7));
+      insets[e] = Math.min(baseInset * jitter, safeCap);
+    }
+
+    const inner = insetPolygon(pts, insets);
+    if (inner.length < 3) return;
+
+    buildJellyPolygon(inner, cornerFrac);
+    ctx.fillStyle = AUX.BG_COLOR;
+    ctx.fill();
+  }
+
+  function render(voronoi) {
+    ctx.fillStyle = AUX.BG_COLOR;
+    ctx.fillRect(0, 0, W, H);
+
+    // 프레임 = 검은 잉크 베이스
+    roundedRectPath(frame);
+    ctx.fillStyle = `rgb(${CONFIG.INK_COLOR})`;
+    ctx.fill();
+
+    // 이후 그리는 모든 세포는 프레임 밖으로 새지 않도록 클립
+    ctx.save();
+    roundedRectPath(frame);
+    ctx.clip();
+
+    for (let i = 0; i < sites.length; i++) {
+      const poly = voronoi.cellPolygon(i);
+      if (!poly) continue;
+      drawCell(sites[i], poly);
+    }
+
+    ctx.restore();
+  }
+
+  // =========================================================================
+  // 메인 루프
+  // =========================================================================
+  let hintHidden = false;
+  function loop(now) {
+    const dt = Math.min((now - lastT) / 1000, 0.05);
+    lastT = now;
+    const t = now / 1000;
+
+    updatePhysics(dt, now, t);
+
+    const combined = sites.concat(frameAnchors);
+    const delaunay = d3.Delaunay.from(combined, (s) => s.x, (s) => s.y);
+    const voronoi = delaunay.voronoi([0, 0, W, H]);
+    render(voronoi);
+
+    if (!hintHidden && activeCellIndex >= 0) {
+      hintHidden = true;
+      hintEl.style.opacity = 0;
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
