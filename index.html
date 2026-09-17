@@ -3,26 +3,40 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Jelly Cell Frame — 젤리 세포 프레임</title>
+<title>loupe</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
 <style>
-  html, body { margin: 0; padding: 0; overflow: hidden; background: #faf7f1; cursor: crosshair; }
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #ffffff; }
   canvas { display: block; }
-  #hint {
-    position: fixed; left: 50%; bottom: 34px; transform: translateX(-50%);
-    font-family: -apple-system, "Malgun Gothic", sans-serif;
-    font-size: 14px; letter-spacing: 0.05em; color: rgba(40,35,30,0.5);
-    pointer-events: none; transition: opacity 1.5s ease;
+  #recordsView { position: fixed; inset: 0; }
+  #leftCanvas { position: absolute; left: 0; top: 0; cursor: default; }
+  #rightScroll { position: absolute; top: 0; height: 100%; overflow-y: auto; overflow-x: hidden; }
+  #rightScroll::-webkit-scrollbar { width: 8px; }
+  #rightScroll::-webkit-scrollbar-thumb { background: #000; border-radius: 4px; }
+  #rightCanvas { display: block; cursor: default; }
+  #searchInput {
+    position: absolute; background: transparent; border: none; outline: none;
+    color: #000; caret-color: #000;
   }
+  #sceneCanvas { position: fixed; inset: 0; cursor: crosshair; }
+  [hidden] { display: none !important; }
   #err {
     position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
-    color: #ffdede; font-family: monospace; font-size: 14px; text-align: center; padding: 20px;
-    background: #200; box-sizing: border-box;
+    color: #fff; font-family: monospace; font-size: 14px; text-align: center; padding: 20px;
+    background: #000; box-sizing: border-box; z-index: 999;
   }
 </style>
 </head>
 <body>
-<canvas id="c"></canvas>
-<div id="hint">세포 하나 위에서 잠시 멈춰보세요</div>
+<div id="recordsView">
+  <canvas id="leftCanvas"></canvas>
+  <input id="searchInput" type="text" autocomplete="off" spellcheck="false" />
+  <div id="rightScroll"><canvas id="rightCanvas"></canvas></div>
+</div>
+<canvas id="sceneCanvas" hidden></canvas>
 <div id="err">d3-delaunay 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인한 뒤 새로고침해주세요.</div>
 
 <script src="https://cdn.jsdelivr.net/npm/d3-delaunay@6/dist/d3-delaunay.min.js"></script>
@@ -30,60 +44,152 @@
 (function () {
   if (typeof d3 === "undefined" || !d3.Delaunay) {
     document.getElementById("err").style.display = "flex";
-    return;
   }
-
-  const canvas = document.getElementById("c");
-  const ctx = canvas.getContext("2d");
-  const hintEl = document.getElementById("hint");
 
   // =========================================================================
   // 조절용 상수 — 여기 값들을 바꿔가며 느낌을 조정하세요
+  // (인터랙션 화면 관련 값은 다음 단계에서 실제로 쓰입니다. 지금은 자리만 마련)
   // =========================================================================
   const CONFIG = {
-    // ── 인터랙션 ──
-    CELL_COUNT: 65,            // 화면을 주도하는 주요 세포 개수
-    SIZE_VARIATION: 0.9,       // 크기 위계 비율. 0=거의 균일, 1=소수의 큰 세포 + 다수의 작은 세포로 위계 극대화
-    ARRIVAL_DWELL_MS: 180,     // 커서가 한 세포 위에서 이만큼(ms) "거의 정지"해야 도착으로 인정 — 인식은 빠르게(0.15~0.2초)
-    STILL_SPEED_PX_S: 40,      // 커서 속도가 이 값(px/초)보다 느려야 "정지"로 간주 — 지나가기만 하면 반응 없음
-    GROW_MS: 3500,             // 부푸는 시간 — 도착은 빨리 알아채도, 부푸는 건 서서히 압력이 차오르듯 느리게(3~4초)
-    SINK_MS: 1000,             // 커서가 떠난 뒤 원래 크기로 가라앉는 시간(ms)
-    INFLATE_AREA_MULT: 7,      // 부푸는 배율 — 완전히 부풀었을 때 목표 면적 = 원래 면적 × 이 값 (약 6~8배)
-    OVERSHOOT_STRENGTH: 0.14,  // 다 부풀었을 때 살짝 튕기는 탄성 오버슛의 세기 (0이면 오버슛 없음)
-    PUSH_RANGE_FRACTION: 0.6,  // 영향 범위 — 부푸는 세포의 압력이 전달되는 거리 = 프레임 크기 × 이 비율
-    BREATHE_SPEED: 0.35,       // 커서가 없을 때 전체 막이 흔들리는 노이즈의 시간 배속
-    TENSION_PERIOD_MS: 9000,   // 세포가 스스로 부풀었다 가라앉는 "긴장" 이벤트의 평균 발생 간격(ms)
+    // ── 서체: 한 종류만 ──
+    // "'Inter', 'Pretendard', sans-serif" 중 Pretendard를 앞에 두면 Pretendard가 기본이 됩니다.
+    FONT_FAMILY: "'Inter', 'Pretendard', sans-serif",
+    FONT_WEIGHT_LOGO: 800,        // 사이트 타이틀(LOUPE) 굵기
+    FONT_WEIGHT_BOLD: 700,        // 제목류 굵기
+    FONT_WEIGHT_MEDIUM: 500,      // 콘텐츠 제목 굵기(가볍게)
+    FONT_WEIGHT_REGULAR: 400,     // 날짜, "by zeth" 등 가장 조용한 텍스트 굵기
 
-    // ── 프레임 ──
-    FRAME_ASPECT: 4 / 3,             // 프레임 비율 — 가로:세로
-    FRAME_CORNER_FRACTION: 0.135,    // 프레임 모서리 r — 짧은 변 대비 모서리 반지름 비율 (약 12~15%)
+    // ── 타이포 위계: 사이트 타이틀:콘텐츠 제목:날짜 ≈ 8:1.2:1 ──
+    FONT_SIZE_L_FRACTION: 0.12,    // 사이트 타이틀(LOUPE) — 화면 세로 기준, 압도적으로 크게
+    FONT_SIZE_M_FRACTION: 0.018,   // 콘텐츠 제목(기록 제목, 인터랙션 제목)
+    FONT_SIZE_S_FRACTION: 0.015,   // 날짜 / "by zeth"
+    TITLE_LETTER_SPACING_EM: 0.04, // "LOUPE" 자간(em 단위, 글자 크기에 비례)
 
-    // ── 세포 렌더링 ──
-    INK_COLOR: "17,17,17",           // 막(잉크)의 색 RGB — 순수 검정에 가까운 진한 잉크색
-    INSET_RANGE_PX: [0.15, 1.2],     // 틈 두께 — [최소,최대] 세포를 안쪽으로 줄이는 거리(px, 한쪽 기준). 실처럼 가늘게
-    CELL_CORNER_RANGE: [0.55, 0.97], // 세포 모서리 반경 — [부풀 때, 눌릴 때] 변 길이 대비 둥글림 비율(0~1). 클수록 젤리처럼 뭉침
+    // ── 왼쪽 패널: 정체성 문구 ──
+    IDENTITY_WORDS: [             // 타이틀 아래 나열되는 문구 (한 줄에 하나)
+      "Perception.", "Aesthetics.", "Design.",
+      "Translation.", "Research.", "Biology.",
+    ],
+    IDENTITY_SIZE_FRACTION: 0.018,  // 문구 글자 크기 (화면 세로 기준)
+    IDENTITY_LINE_HEIGHT: 1.9,      // 문구 줄 간격 (글자 크기 배수)
+    IDENTITY_OPACITY: 0.42,         // 문구 농도 (0~1, 낮을수록 연함)
+    IDENTITY_GAP_LINES: 3,          // "by zeth"와 문구 사이에 띄우는 줄 수
+
+    // ── 메인 화면 레이아웃 ──
+    LEFT_PANEL_FRACTION: 0.4,        // 좌우 분할 비율 (기존과 동일하게 유지)
+    LOGO_TOP_FRACTION: 0.14,         // 로고 위쪽 여백 비율
+    SEARCH_WIDTH_FRACTION: 0.65,     // 검색 바(아이콘+선) 전체 길이 = 타이틀 폭 × 이 비율 (60~70%)
+    GRID_COLS: 3,                    // 한 행에 보이는 원 개수 (3×3)
+    CIRCLE_DIAMETER_FRACTION: 0.62,  // 한 칸(컬럼) 너비 대비 원 지름 비율
+    ROW_LABEL_SPACE_FRACTION: 0.62,  // 원 지름 대비, 제목+날짜가 차지하는 세로 공간 비율
+    SHAPE_WOBBLE_PX: 1.2,            // 원/상징 형태의 미세한 비정형 정도(px)
+
+    // ── 인터랙션 화면: 프레임 ──
+    FRAME_ASPECT: 4 / 3,             // 프레임 비율
+    FRAME_MARGIN_FRACTION: 0.08,     // 프레임 좌우/기준 여백 비율
+    FRAME_OPTICAL_TOP_FACTOR: 0.72,  // 위쪽 여백 = 기준 여백 × 이 값(<1). 아래는 제목 자리만큼 더 남아 광학적으로 중앙처럼 보임
+    FRAME_CORNER_FRACTION: 0.135,    // 프레임 모서리 반지름 비율(짧은 변 기준)
+    FRAME_BORDER_PX: 10,             // 프레임 안쪽, 세포 무리를 둘러싼 검은 여백(테두리) 두께
+
+    // ── 인터랙션 화면: 세포 ──
+    CELL_COUNT: 70,                    // 세포 개수
+    SIZE_VARIATION: 0.9,               // 크기 편차
+    INSET_RANGE_PX: [0.8, 2.6],        // 틈 두께 — [최소,최대] (100% 배율에서도 가늘게)
+    CELL_CORNER_RANGE: [0.92, 1.0],    // 세포 모서리 반경 — 어떤 크기에서도 각지지 않도록 최대치 부근
+
+    // ── 인터랙션 화면: 인터랙션 ──
+    ARRIVAL_DWELL_MS: 180,             // 머무름 인식 시간
+    STILL_SPEED_PX_S: 40,
+
+    // 번짐(색)과 팽창(크기)이 "같은 움직임"처럼 보이도록 이징 강도를 공유합니다.
+    // 강한 ease-out: 처음엔 아주 빠르게 반응하고, 목표에 가까워질수록 뚜렷하게 느려집니다.
+    INTERACTION_EASE_POWER: 3.5,       // 클수록 초반 반응이 더 강하고 후반이 더 느려짐
+
+    GROW_MS: 1800,                      // 세포가 다 부푸는 데 걸리는 시간(ms) — 처음 0.1초 안에 눈에 띄게 시작
+    SINK_MS: 1000,                       // 가라앉는 시간(ms)
+    MAX_CELL_FRAME_FRACTION: 0.33,       // 세포가 다 부풀었을 때 목표 크기 = 프레임 내부 면적 × 이 비율(약 1/3)
+    INFLATE_AREA_MULT_CAP: 60,           // 위 목표가 너무 커지는 걸 막는 안전 상한 배율
+    PUSH_RANGE_FRACTION: 0.95,           // 영향 범위 — 프레임 전체에 압박이 퍼지도록 넓게
+
+    // ── 인터랙션 화면: 번짐(물감) 효과 ──
+    NEON_PALETTE: ["#00E5FF", "#39FF14", "#FF00E5", "#FFE500", "#FF3B00", "#7B2BFF"], // 번질 때 이 중 하나를 무작위로 사용
+    BLEED_RISE_MS: 1400,                // 중심에서 가장자리까지 번져 차오르는 시간(ms) — GROW_MS와 같은 리듬
+    BLEED_FALL_MS: 650,                 // 커서가 떠난 뒤 되감기는 시간(ms)
+    BLEED_VELOCITY_SENSITIVITY: 0.9,    // 커서 속도가 번짐 깊이에 영향을 주는 강도(0~1)
+
+    // ── 인터랙션 화면: 레이아웃과 위계 ──
+    INTERACTION_TITLE_PX: 22,           // 작품 제목 글자 크기(px, 20~24 권장)
+    INTERACTION_TITLE_GAP_PX: 32,       // 프레임 하단과 제목 사이 간격(px, 28~36 권장)
+    INTERACTION_TITLE_LETTER_SPACING_PX: 0.6, // 작품 제목 자간(px)
+    BACK_BUTTON_PAD_PX: 32,             // back 버튼 — 화면 가장자리에서 안쪽으로 띄우는 거리(px)
+    BACK_BUTTON_FONT_PX: 13,            // back 버튼 글자 크기(px, 12~13 권장)
+
+    // ── 화면 전환 ──
+    TRANSITION_MS: 1600,               // 메인 → 인터랙션 화면 전환 시간(확대)
   };
 
-  // 위 항목들을 보조하는 부수적 상수 (직접 만질 일은 적지만 필요하면 함께 조정)
+  // =========================================================================
+  // 기록 목록 — 여기에 항목을 추가하면 메인 화면에 원이 자동으로 늘어납니다.
+  // 코드를 몰라도 이 배열만 편집하면 새 기록을 쌓을 수 있습니다.
+  //
+  //   title       : 원 아래 표시될 제목
+  //   date        : 날짜 표시 (원하는 형식 그대로 — 예: "2026.09.17")
+  //   symbolPath  : 원 안에 흰색으로 파낼 상징 형태의 SVG path "d" 문자열.
+  //                 좌표 단위는 아무거나 상관없습니다 — 코드가 이 path의 bounding box를
+  //                 자동으로 계산해서 0~1 비율로 정규화한 뒤 원 크기에 맞춰 배치합니다.
+  //
+  //                 【일러스트레이터에서 만드는 법】
+  //                 1) 원하는 형태를 그림 (칠 색상은 상관없음, 모양만 중요)
+  //                 2) File > Export > Export As... 에서 SVG로 저장
+  //                    (또는 형태를 선택한 채 File > Save a Copy 로 .svg 저장)
+  //                 3) 저장된 .svg 파일을 메모장/VS Code 등 텍스트 편집기로 열기
+  //                 4) 그 안에서 <path d="..."/> 를 찾아, 따옴표 안의 문자열만 복사
+  //                 5) 그 문자열을 아래처럼 symbolPath 값으로 붙여넣기
+  //   interactive : 연결할 인터랙션 화면 이름. 지금은 "cells"만 구현되어 있습니다.
+  //                 아직 없다면 null로 두면 원이 비활성 상태로 남습니다(클릭해도 반응 없음)
+  // =========================================================================
+  const RECORDS = [
+    {
+      title: "trial_cells",
+      date: "2026.09.17",
+      symbolPath: "M74,6 C80,26 75,50 59,68 C45,84 27,92 10,94 C12,76 18,56 30,40 C43,22 58,10 74,6 Z",
+      // symbolBlobs가 있으면 symbolPath 대신 이것을 쓴다.
+      // 서로 붙어 있는 둥근 영역들 — 하나가 부풀면 나머지가 줄어든다. {x, y, r} (0~100 좌표계)
+      symbolBlobs: [
+        { x: 38, y: 43, r: 27 },
+        { x: 66, y: 37, r: 21 },
+        { x: 55, y: 68, r: 23 },
+      ],
+      interactive: "cells",
+    },
+    // 새 기록은 아래처럼 이어서 추가하세요:
+    // {
+    //   title: "다음 관찰",
+    //   date: "2026.10.02",
+    //   symbolPath: "M... (일러스트레이터에서 복사한 path)",
+    //   interactive: null,
+    // },
+  ];
   const AUX = {
-    LLOYD_ITERATIONS: 2,        // 초기 배치를 정돈하는 로이드 이완 반복 횟수 — 적을수록 불규칙함이 많이 남음
-    LLOYD_STRENGTH: 0.5,        // 이완 1회당 중심으로 당기는 세기 (큰 세포는 이보다 약하게 적용됨)
-    BREATHE_AMPLITUDE: 1.4,     // 숨쉬기 흔들림의 진폭(px)
-    TREMBLE_EXTRA_JITTER: 4.5,  // 부풀거나 긴장된 정도에 비례해 추가되는 떨림 진폭(px)
-    TENSION_TARGET_AMT: 0.62,   // 자발적 "긴장" 상태가 최대로 도달하는 부푼 정도 (1=커서로 완전히 부푼 상태)
-    TENSION_HOLD_MS: 700,       // 긴장이 정점에서 머무는 시간(ms)
-    TENSION_RISE_MULT: 1.6,     // 긴장이 올라가는 시간 = GROW_MS × 이 값 (커서 인터랙션보다 느리게)
-    TENSION_FALL_MULT: 1.6,     // 긴장이 풀리는 시간 = SINK_MS × 이 값
-    TENSION_MAX_CONCURRENT: 2,  // 동시에 긴장 상태일 수 있는 세포 최대 개수
-    BG_COLOR: "#faf7f1",        // 배경 오프화이트
+    EMPTY_ROWS_BUFFER: 4, // 실제 기록 외에 미리 보여줄 빈 자리 여유 행(행당 GRID_COLS개)
 
-    FRAME_MARGIN_FRACTION: 0.06,    // 프레임과 화면 가장자리 사이 여백 비율 (짧은 쪽 기준)
-    FRAME_SAMPLES: 64,              // 프레임 둘레를 표본화할 점 개수 (경계 고정점 겸용)
-    EDGE_SMALL_CELL_COUNT: 45,      // 가장자리에 추가로 무리 짓는 작은 세포 개수
-    EDGE_BAND_FRACTION: 0.32,       // "가장자리"로 간주할 바깥쪽 폭 비율
-    EDGE_SMALL_RADIUS_FACTOR: [0.1, 0.32], // 가장자리 작은 세포의 반지름 범위(전체 평균 반지름 대비 배율)
-    JUNCTION_SATELLITE_COUNT: 22,   // 큰 세포 주변(=미래의 접합부 근처)에 붙이는 작은 위성 세포 개수
-    INSET_JITTER_RANGE: [0.7, 1.4], // 틈 두께에 곁들이는 손그림 느낌의 변이 폭
+    // ── 인터랙션 화면 세포 물리의 부수적 상수 ──
+    SPRING_K: 0.14,
+    DAMPING: 0.78,
+    INSET_JITTER_RANGE: [0.85, 1.15], // 틈 두께의 자리별 편차 폭(과한 손맛은 제거했지만 완전 균일하진 않게)
+    FRAME_SAMPLES: 64,                // 프레임 둘레를 표본화할 점 개수(경계 고정점 겸용)
+    BLEED_REFERENCE_SPEED: 900,       // 이 속도(px/초) 이상이면 번짐이 최대로 얕아짐
+    BLEED_MIN_DEPTH: 0.22,            // 커서가 아주 빠를 때 번짐이 도달하는 최소 깊이(0~1)
+
+    // ── 메인 화면 심볼 호버 변형(윤곽이 일렁이는 정도) ──
+    SYMBOL_IDLE_LIFE: 0.28,           // 커서가 없을 때도 유지되는 움직임의 정도(0~1)
+    SYMBOL_WOBBLE: 0.055,             // 가장자리가 우글거리는 정도(반지름 대비)
+    SYMBOL_BLOB_AMP: 0.3,             // 둥근 영역이 부풀고 줄어드는 폭(반지름 대비)
+    SYMBOL_BLOB_SPEED: 1.5,           // 부풀고 줄어드는 속도
+    SYMBOL_HOVER_EASE: 5.5,           // 호버가 켜지고 꺼지는 부드러움(클수록 빠르게 반응)
+    SYMBOL_RIPPLE_AMOUNT: 0.17,       // 윤곽이 밀려나는 최대 거리(심볼 반지름 대비 비율)
+    SYMBOL_RIPPLE_SPEED: 0.9,         // 일렁임의 시간 속도(작을수록 느긋하게)
+    SYMBOL_RIPPLE_SPATIAL: 0.35,      // 윤곽을 따라 이웃한 점끼리 얼마나 닮게 움직이는지(작을수록 더 매끄럽게 이어짐)
   };
 
   // =========================================================================
@@ -96,6 +202,9 @@
     if (doClamp) t = clamp(t, 0, 1);
     return outMin + (outMax - outMin) * t;
   }
+  function vSub(a, b) { return [a[0] - b[0], a[1] - b[1]]; }
+  function vNorm(v) { const l = Math.hypot(v[0], v[1]) || 1e-6; return [v[0] / l, v[1] / l]; }
+  function vDist(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1]); }
   function hashN(n) {
     const x = Math.sin(n * 127.1) * 43758.5453123;
     return x - Math.floor(x);
@@ -105,6 +214,29 @@
     const a = hashN(i), b = hashN(i + 1);
     const u = f * f * (3 - 2 * f);
     return a + (b - a) * u;
+  }
+  function seededJitter(seed, salt) { return hashN(seed * 12.9898 + salt * 78.233) * 2 - 1; }
+  function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+  // ── 인터랙션 화면(세포/보로노이)에서 쓰는 기하 유틸리티 ──
+  function normalizePoly(poly) {
+    if (poly.length > 1) {
+      const first = poly[0], last = poly[poly.length - 1];
+      if (Math.abs(first[0] - last[0]) < 1e-6 && Math.abs(first[1] - last[1]) < 1e-6) {
+        return poly.slice(0, -1);
+      }
+    }
+    return poly;
+  }
+  function polygonArea(poly) {
+    const pts = normalizePoly(poly);
+    let a = 0;
+    const n = pts.length;
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = pts[i], [x1, y1] = pts[(i + 1) % n];
+      a += x0 * y1 - x1 * y0;
+    }
+    return Math.abs(a) / 2;
   }
   function polygonCentroid(pts) {
     let x = 0, y = 0, a = 0;
@@ -124,26 +256,6 @@
       return [sx / n, sy / n];
     }
     return [x / (6 * a), y / (6 * a)];
-  }
-  function normalizePoly(poly) {
-    if (poly.length > 1) {
-      const first = poly[0], last = poly[poly.length - 1];
-      if (Math.abs(first[0] - last[0]) < 1e-6 && Math.abs(first[1] - last[1]) < 1e-6) {
-        return poly.slice(0, -1);
-      }
-    }
-    return poly;
-  }
-  function polygonArea(poly) {
-    const pts = normalizePoly(poly);
-    let a = 0;
-    const n = pts.length;
-    for (let i = 0; i < n; i++) {
-      const [x0, y0] = pts[i];
-      const [x1, y1] = pts[(i + 1) % n];
-      a += x0 * y1 - x1 * y0;
-    }
-    return Math.abs(a) / 2;
   }
   function polyBounds(pts) {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -165,53 +277,116 @@
     }
     return inside;
   }
-  function vSub(a, b) { return [a[0] - b[0], a[1] - b[1]]; }
-  function vNorm(v) { const l = Math.hypot(v[0], v[1]) || 1e-6; return [v[0] / l, v[1] / l]; }
-  function vDist(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1]); }
 
-  // 시간(초 단위)과 감쇠비로부터 감쇠-스프링 물리 계수(k, c)를 만든다.
-  // periodSec: 대략적인 정착 시간, overshoot: 목표를 지나쳤다 돌아오는 비율(0=오버슛 없음)
-  function springParams(periodSec, overshoot) {
-    let zeta;
-    if (overshoot <= 0.001) {
-      zeta = 1;
-    } else {
-      const lnO = Math.log(overshoot);
-      zeta = -lnO / Math.sqrt(Math.PI * Math.PI + lnO * lnO);
+  // 강한 ease-out: 진행도 0~1을 받아 처음엔 빠르게, 갈수록 느려지는 진행도로 바꾼다.
+  // 번짐과 팽창이 같은 리듬으로 읽히도록 이 함수 하나를 공유해서 쓴다.
+  function easeOutPower(t, power) { return 1 - Math.pow(1 - clamp(t, 0, 1), power); }
+
+  // 세포의 "부푼 정도"(amt, 0~1)를 시간 기반으로 갱신한다.
+  // growing이 바뀌는 순간의 값을 출발점으로 삼아서, 도중에 방향이 바뀌어도 끊기지 않는다.
+  function updateSiteAmt(site, growing, now) {
+    if (growing !== site.growing) {
+      site.growing = growing;
+      site.amtPhaseStart = now;
+      site.amtPhaseStartValue = site.amt;
     }
-    const omega = 4 / (Math.max(zeta, 0.05) * Math.max(periodSec, 0.05));
-    return { k: omega * omega, c: 2 * zeta * omega };
-  }
-  const RISE_SPRING = springParams(CONFIG.GROW_MS / 1000, CONFIG.OVERSHOOT_STRENGTH);
-  const FALL_SPRING = springParams(CONFIG.SINK_MS / 1000, 0);
-
-  function updateAmt(site, target, dt) {
-    const sp = target > site.amt ? RISE_SPRING : FALL_SPRING;
-    const acc = -sp.k * (site.amt - target) - sp.c * site.ampVel;
-    site.ampVel += acc * dt;
-    site.amt += site.ampVel * dt;
-    if (site.amt < -0.08) { site.amt = -0.08; site.ampVel = 0; }
+    const durationMs = growing ? CONFIG.GROW_MS : CONFIG.SINK_MS;
+    const elapsedSec = (now - site.amtPhaseStart) / 1000;
+    const p = easeOutPower(elapsedSec / (durationMs / 1000), CONFIG.INTERACTION_EASE_POWER);
+    const target = growing ? 1 : 0;
+    site.amt = lerp(site.amtPhaseStartValue, target, p);
   }
 
-  // =========================================================================
-  // 상태
-  // =========================================================================
-  let W, H, DPR;
-  let sites = [];
-  let frame = null;         // { x, y, w, h, r, cx, cy } — 고정된 둥근 사각형 프레임
-  let frameAnchors = [];    // 프레임 둘레의 정적인 경계 고정점 { x, y } — 보로노이 경계용, 렌더링 대상 아님
-  let frameR0 = 0;          // 압력 전달 범위 계산용 프레임 특성 반지름
-  let lastT = performance.now();
-  let hoverIndex = -1, dwellTimer = 0, activeCellIndex = -1;
-  let prevFrameX = null, prevFrameY = null;
-  let tensionSlots = [];
-  let nextTensionAt = performance.now() + CONFIG.TENSION_PERIOD_MS * (0.5 + Math.random());
+  // 활성(부푸는) 세포들이 주변에 미치는 압력을 한 점(hx,hy)에서 합산한다.
+  function computePush(hx, hy, pushers) {
+    let px = 0, py = 0;
+    for (const p of pushers) {
+      const dx = hx - p.hx, dy = hy - p.hy;
+      const d = Math.hypot(dx, dy) || 0.0001;
+      if (d < p.influenceR) {
+        const falloff = 0.5 * (1 + Math.cos((Math.PI * d) / p.influenceR));
+        const push = falloff * p.maxPush;
+        px += (dx / d) * push;
+        py += (dy / d) * push;
+      }
+    }
+    return [px, py];
+  }
 
-  const pointer = { x: -9999, y: -9999, onScreen: false };
+  // 볼록 다각형을 각 변마다 다른 거리(insetArr)만큼 안쪽으로 평행 이동시켜 축소한다.
+  function insetPolygon(pts, insetArr) {
+    const n = pts.length;
+    if (n < 3) return pts;
+    let signedArea2 = 0;
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = pts[i], [x1, y1] = pts[(i + 1) % n];
+      signedArea2 += x0 * y1 - x1 * y0;
+    }
+    const sign = signedArea2 >= 0 ? 1 : -1;
+    const offsetLines = [];
+    for (let i = 0; i < n; i++) {
+      const p1 = pts[i], p2 = pts[(i + 1) % n];
+      let dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+      const len = Math.hypot(dx, dy) || 1e-6;
+      dx /= len; dy /= len;
+      const nx = sign > 0 ? -dy : dy;
+      const ny = sign > 0 ? dx : -dx;
+      const d = insetArr[i];
+      offsetLines.push({ px: p1[0] + nx * d, py: p1[1] + ny * d, dx, dy });
+    }
+    const result = [];
+    for (let i = 0; i < n; i++) {
+      const a = offsetLines[(i - 1 + n) % n];
+      const b = offsetLines[i];
+      const denom = a.dx * b.dy - a.dy * b.dx;
+      if (Math.abs(denom) < 1e-9) { result.push([b.px, b.py]); continue; }
+      const tt = ((b.px - a.px) * b.dy - (b.py - a.py) * b.dx) / denom;
+      result.push([a.px + a.dx * tt, a.py + a.dy * tt]);
+    }
+    return result;
+  }
 
-  // =========================================================================
-  // 프레임: 화면 중앙의 4:3 둥근 사각형
-  // =========================================================================
+  // 아주 짧은 변의 두 끝점을 하나(중점)로 합쳐서 제거한다. 둥글리기 전에 적용하면,
+  // 그 짧은 변 때문에 양쪽 모서리 반경이 억지로 작아져 각져 보이는 문제가 사라진다.
+  function simplifyForRounding(pts, minEdgeLen) {
+    if (pts.length <= 3) return pts;
+    const result = [];
+    let skip = false;
+    for (let i = 0; i < pts.length; i++) {
+      if (skip) { skip = false; continue; }
+      const cur = pts[i];
+      const next = pts[(i + 1) % pts.length];
+      if (vDist(cur, next) < minEdgeLen && result.length + (pts.length - i - 1) > 2) {
+        result.push([(cur[0] + next[0]) / 2, (cur[1] + next[1]) / 2]);
+        skip = true;
+      } else {
+        result.push(cur);
+      }
+    }
+    return result.length >= 3 ? result : pts;
+  }
+
+  // 다각형의 각 모서리를 변 길이에 비례하는 큰 곡률로 둥글려 현재 캔버스 경로에 만든다. (젤리 세포)
+  function buildJellyPolygon(ctx, pts, cornerFrac) {
+    const n = pts.length;
+    if (n < 3) { ctx.beginPath(); return; }
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const prev = pts[(i - 1 + n) % n];
+      const cur = pts[i];
+      const next = pts[(i + 1) % n];
+      const toPrev = vNorm(vSub(prev, cur));
+      const toNext = vNorm(vSub(next, cur));
+      const r = cornerFrac * Math.min(vDist(prev, cur), vDist(cur, next)) * 0.48;
+      const a = [cur[0] + toPrev[0] * r, cur[1] + toPrev[1] * r];
+      const b = [cur[0] + toNext[0] * r, cur[1] + toNext[1] * r];
+      if (i === 0) ctx.moveTo(a[0], a[1]); else ctx.lineTo(a[0], a[1]);
+      ctx.quadraticCurveTo(cur[0], cur[1], b[0], b[1]);
+    }
+    ctx.closePath();
+  }
+
+  // 둥근 사각형 둘레를 따라 표본점을 고르게 뽑는다 (직선 4개 + 모서리 호 4개) — 경계 고정점용
   function sampleRoundedRectBoundary(x, y, w, h, r, n) {
     const straightW = w - 2 * r;
     const straightH = h - 2 * r;
@@ -239,22 +414,8 @@
     return pts;
   }
 
-  function generateFrameShape() {
-    const margin = Math.min(W, H) * AUX.FRAME_MARGIN_FRACTION;
-    const availW = W - margin * 2, availH = H - margin * 2;
-    let w, h;
-    if (availW / availH > CONFIG.FRAME_ASPECT) { h = availH; w = h * CONFIG.FRAME_ASPECT; }
-    else { w = availW; h = w / CONFIG.FRAME_ASPECT; }
-    const cx = W / 2, cy = H / 2;
-    const x = cx - w / 2, y = cy - h / 2;
-    const r = Math.min(w, h) * CONFIG.FRAME_CORNER_FRACTION;
-    const pts = sampleRoundedRectBoundary(x, y, w, h, r, AUX.FRAME_SAMPLES);
-    return { x, y, w, h, r, cx, cy, pts };
-  }
-
   // 캔버스에 실제 둥근 사각형 경로를 만든다 (프레임을 그리거나 클립할 때 사용)
-  function roundedRectPath(f) {
-    const { x, y, w, h, r } = f;
+  function roundedRectPath(ctx, x, y, w, h, r) {
     ctx.beginPath();
     ctx.moveTo(x + r, y);
     ctx.lineTo(x + w - r, y);
@@ -268,18 +429,589 @@
     ctx.closePath();
   }
 
+  function fontStr(px, weight) { return `${weight} ${px}px ${CONFIG.FONT_FAMILY}`; }
+
+  function setupCanvasDPR(canvasEl, cssW, cssH) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvasEl.width = Math.max(1, Math.round(cssW * dpr));
+    canvasEl.height = Math.max(1, Math.round(cssH * dpr));
+    canvasEl.style.width = cssW + "px";
+    canvasEl.style.height = cssH + "px";
+    const c = canvasEl.getContext("2d");
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return c;
+  }
+
+  // 여러 점을 변의 중점끼리 잇는 매끄러운 닫힌 곡선으로 그린다 — 모든 유기적 형태의 뼈대.
+  function smoothClosedPath(ctx, pts) {
+    const n = pts.length;
+    ctx.beginPath();
+    if (n < 3) return;
+    const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const m0 = mid(pts[n - 1], pts[0]);
+    ctx.moveTo(m0[0], m0[1]);
+    for (let i = 0; i < n; i++) {
+      const next = pts[(i + 1) % n];
+      const m = mid(pts[i], next);
+      ctx.quadraticCurveTo(pts[i][0], pts[i][1], m[0], m[1]);
+    }
+    ctx.closePath();
+  }
+
+  // 완벽한 정원이 아니라, 곡률이 매끄럽게 이어지는 미세하게 비정형인 덩어리 경로.
+  function wobblyBlobPath(ctx, cx, cy, r, seed, wobble) {
+    const n = 20;
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const t = (i / n) * Math.PI * 2;
+      const rr = r + seededJitter(seed, i) * wobble;
+      pts.push([cx + Math.cos(t) * rr, cy + Math.sin(t) * rr]);
+    }
+    smoothClosedPath(ctx, pts);
+  }
+
+  // "LOUPE" 로고 — 대문자 P를 돋보기(원=렌즈 + 곧은 기둥=손잡이)로 그린다.
+  // 자간을 준 대문자 렌더링. 반환값: 로고 전체 너비(정렬/검색 바 폭 계산에 사용)
+  function drawLoupeLogo(ctx, x, y, fontSize) {
+    ctx.font = fontStr(fontSize, CONFIG.FONT_WEIGHT_LOGO);
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#000";
+
+    const spacing = fontSize * CONFIG.TITLE_LETTER_SPACING_EM;
+    let cursor = x;
+    const drawChar = (ch) => {
+      ctx.fillText(ch, cursor, y);
+      cursor += ctx.measureText(ch).width + spacing;
+    };
+
+    drawChar("L");
+    drawChar("O");
+    drawChar("U");
+
+    // P — 대문자 비례의 돋보기(원=렌즈, 곧은 기둥=손잡이), 기울이지 않고 똑바로
+    const capHeight = fontSize * 0.72;
+    const bowlR = capHeight * 0.34;
+    const stemW = Math.max(2, fontSize * 0.11);
+    const stemX = cursor + stemW / 2;
+    const bowlCx = stemX + bowlR * 0.92;
+    const bowlCy = y - capHeight + bowlR;
+
+    ctx.beginPath();
+    ctx.rect(stemX - stemW / 2, y - capHeight, stemW, capHeight);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(bowlCx, bowlCy, bowlR, 0, Math.PI * 2);
+    ctx.fill();
+
+    cursor = (bowlCx + bowlR) + spacing;
+    drawChar("E");
+
+    return (cursor - spacing) - x;
+  }
+
+  // 검색 바 앞에 붙는 작은 돋보기 아이콘 — 로고의 P와 같은 언어(원+짧은 손잡이), 획 없이 채움만.
+  function drawMagnifierIcon(ctx, cx, cy, size) {
+    const outerR = size * 0.34;
+    const innerR = outerR * 0.6;
+    const stemW = Math.max(1.4, size * 0.1);
+    const stemH = size * 0.32;
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, outerR, 0, Math.PI * 2);
+    ctx.arc(cx, cy, innerR, 0, Math.PI * 2);
+    ctx.fillStyle = "#000";
+    ctx.fill("evenodd");
+
+    ctx.beginPath();
+    ctx.rect(cx - stemW / 2, cy + outerR * 0.6, stemW, stemH);
+    ctx.fill();
+  }
+
   // =========================================================================
-  // 초기 배치: 프레임 안에, 크기 편차가 있는 다트 던지기 + 약한 로이드 이완
+  // 기록 상징 — 일러스트레이터에서 만든 SVG path를 그대로 사용한다.
+  // 아주 단순한 SVG path 파서(M/L/H/V/C/Q/Z만 지원 — 일반적인 손그림 형태에는 충분)로
+  // 좌표를 읽고, path의 bounding box를 기준으로 자동 정규화해서 원 크기에 맞춘다.
+  // path가 무엇이든 이 로직 하나로 배치·스케일·호버 변형이 똑같이 적용된다.
   // =========================================================================
+  function parseSvgPath(d) {
+    const tokens = d.match(/[a-zA-Z]|-?\d*\.?\d+(?:e-?\d+)?/g) || [];
+    let i = 0;
+    const num = () => parseFloat(tokens[i++]);
+    let cx = 0, cy = 0, startX = 0, startY = 0;
+    let cmd = null;
+    const subpaths = [];
+    let cur = null;
+    while (i < tokens.length) {
+      if (/[a-zA-Z]/.test(tokens[i])) { cmd = tokens[i]; i++; }
+      switch (cmd) {
+        case "M": cx = num(); cy = num(); startX = cx; startY = cy; cur = { ops: [{ t: "M", x: cx, y: cy }] }; subpaths.push(cur); cmd = "L"; break;
+        case "m": cx += num(); cy += num(); startX = cx; startY = cy; cur = { ops: [{ t: "M", x: cx, y: cy }] }; subpaths.push(cur); cmd = "l"; break;
+        case "L": cx = num(); cy = num(); cur.ops.push({ t: "L", x: cx, y: cy }); break;
+        case "l": cx += num(); cy += num(); cur.ops.push({ t: "L", x: cx, y: cy }); break;
+        case "H": cx = num(); cur.ops.push({ t: "L", x: cx, y: cy }); break;
+        case "h": cx += num(); cur.ops.push({ t: "L", x: cx, y: cy }); break;
+        case "V": cy = num(); cur.ops.push({ t: "L", x: cx, y: cy }); break;
+        case "v": cy += num(); cur.ops.push({ t: "L", x: cx, y: cy }); break;
+        case "C": { const x1 = num(), y1 = num(), x2 = num(), y2 = num(), x = num(), y = num(); cur.ops.push({ t: "C", x1, y1, x2, y2, x, y }); cx = x; cy = y; break; }
+        case "c": { const x1 = cx + num(), y1 = cy + num(), x2 = cx + num(), y2 = cy + num(), x = cx + num(), y = cy + num(); cur.ops.push({ t: "C", x1, y1, x2, y2, x, y }); cx = x; cy = y; break; }
+        case "Q": { const x1 = num(), y1 = num(), x = num(), y = num(); cur.ops.push({ t: "Q", x1, y1, x, y }); cx = x; cy = y; break; }
+        case "q": { const x1 = cx + num(), y1 = cy + num(), x = cx + num(), y = cy + num(); cur.ops.push({ t: "Q", x1, y1, x, y }); cx = x; cy = y; break; }
+        case "Z": case "z": cur.ops.push({ t: "Z" }); cx = startX; cy = startY; break;
+        default: i++;
+      }
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const consider = (x, y) => { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; };
+    for (const sp of subpaths) for (const op of sp.ops) {
+      if (op.t === "M" || op.t === "L") consider(op.x, op.y);
+      else if (op.t === "C") { consider(op.x1, op.y1); consider(op.x2, op.y2); consider(op.x, op.y); }
+      else if (op.t === "Q") { consider(op.x1, op.y1); consider(op.x, op.y); }
+    }
+    return { subpaths, bounds: { minX, minY, maxX, maxY } };
+  }
+
+  // 3차/2차 베지어를 잘게 쪼개 직선 점열로 만든다 — 윤곽을 따라 흔드는 변형에 필요.
+  function flattenCubic(p0, x1, y1, x2, y2, p3, steps, out) {
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps, mt = 1 - t;
+      const a = mt * mt * mt, b = 3 * mt * mt * t, c = 3 * mt * t * t, e = t * t * t;
+      out.push([a * p0[0] + b * x1 + c * x2 + e * p3[0], a * p0[1] + b * y1 + c * y2 + e * p3[1]]);
+    }
+  }
+  function flattenQuad(p0, x1, y1, p3, steps, out) {
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps, mt = 1 - t;
+      out.push([mt * mt * p0[0] + 2 * mt * t * x1 + t * t * p3[0], mt * mt * p0[1] + 2 * mt * t * y1 + t * t * p3[1]]);
+    }
+  }
+  function flattenSubpath(sp, stepsPerSeg) {
+    const pts = [];
+    let cur = null;
+    for (const op of sp.ops) {
+      if (op.t === "M") { cur = [op.x, op.y]; pts.push(cur); }
+      else if (op.t === "L") { cur = [op.x, op.y]; pts.push(cur); }
+      else if (op.t === "C") { flattenCubic(cur, op.x1, op.y1, op.x2, op.y2, [op.x, op.y], stepsPerSeg, pts); cur = [op.x, op.y]; }
+      else if (op.t === "Q") { flattenQuad(cur, op.x1, op.y1, [op.x, op.y], stepsPerSeg, pts); cur = [op.x, op.y]; }
+    }
+    return pts;
+  }
+
+  const symbolCache = new Map();
+  function getParsedSymbol(pathStr) {
+    let parsed = symbolCache.get(pathStr);
+    if (!parsed) {
+      const raw = parseSvgPath(pathStr);
+      const flat = raw.subpaths.map((sp) => flattenSubpath(sp, 14)).filter((p) => p.length >= 3);
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const sub of flat) for (const [x, y] of sub) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+      parsed = { flat, bounds: { minX, minY, maxX, maxY } };
+      symbolCache.set(pathStr, parsed);
+    }
+    return parsed;
+  }
+
+  // 닫힌 점열을 매끄러운 곡선으로 "이어 붙인다"(beginPath를 새로 하지 않음) —
+  // 여러 서브패스를 한 path에 모아 evenodd로 한 번에 채우기 위함.
+  function appendSmoothClosedPath(ctx, pts) {
+    const n = pts.length;
+    if (n < 3) return;
+    const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const m0 = mid(pts[n - 1], pts[0]);
+    ctx.moveTo(m0[0], m0[1]);
+    for (let i = 0; i < n; i++) {
+      const next = pts[(i + 1) % n];
+      const m = mid(pts[i], next);
+      ctx.quadraticCurveTo(pts[i][0], pts[i][1], m[0], m[1]);
+    }
+    ctx.closePath();
+  }
+
+  // 공통 로직: path가 무엇이든 이 함수 하나로 정규화 배치 + 호버 시 윤곽이 일렁이는 변형까지 처리된다.
+  // 변형은 크기를 키우는 게 아니라, 윤곽의 각 점을 바깥/안쪽으로 노이즈만큼 밀어내는 방식.
+  // 심볼마다 호버 정도를 0↔1로 부드럽게 오가게 기억해둔다(딱딱 켜지지 않도록).
+  const symbolHover = new Map();
+  function symbolHoverAmount(seed, hovered, t) {
+    let st = symbolHover.get(seed);
+    if (!st) { st = { amt: 0, lastT: t }; symbolHover.set(seed, st); }
+    const dt = Math.min(Math.max(t - st.lastT, 0), 0.1); // t는 초 단위
+    st.lastT = t;
+    const target = hovered ? 1 : 0;
+    st.amt += (target - st.amt) * (1 - Math.exp(-dt * AUX.SYMBOL_HOVER_EASE));
+    return st.amt;
+  }
+
+  // 서로 붙어 있는 둥근 영역들. 위상을 어긋나게 해서 하나가 부풀면 다른 하나가 줄어든다.
+  function drawBlobSymbol(ctx, blobs, targetRadius, t, amt, seed) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const b of blobs) {
+      minX = Math.min(minX, b.x - b.r); maxX = Math.max(maxX, b.x + b.r);
+      minY = Math.min(minY, b.y - b.r); maxY = Math.max(maxY, b.y + b.r);
+    }
+    const half = Math.max(maxX - minX, maxY - minY) / 2 || 1;
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    const scale = targetRadius / half;
+    const T = t * AUX.SYMBOL_BLOB_SPEED;
+
+    // 정지 상태에도 약하게 살아 있게 하고, 커서를 올리면 그 위에 크게 더해진다.
+    const life = AUX.SYMBOL_IDLE_LIFE + (1 - AUX.SYMBOL_IDLE_LIFE) * amt;
+
+    ctx.beginPath();
+    for (let i = 0; i < blobs.length; i++) {
+      const b = blobs[i];
+      const phase = (i / blobs.length) * Math.PI * 2 + seed * 0.7;
+      const pulse = 1 + life * AUX.SYMBOL_BLOB_AMP * Math.sin(T + phase);
+      const R = b.r * pulse * scale;
+      const bx = (b.x - cx) * scale, by = (b.y - cy) * scale;
+
+      // 가장자리를 각도에 따라 우글거리게 — 정수배 파동이라 한 바퀴 돌아도 이음매가 없다.
+      const STEPS = 48;
+      const wob = life * AUX.SYMBOL_WOBBLE;
+      for (let k = 0; k <= STEPS; k++) {
+        const a = (k / STEPS) * Math.PI * 2;
+        const w =
+          0.55 * Math.sin(3 * a + T * 1.3 + phase) +
+          0.30 * Math.sin(5 * a - T * 0.9 + phase * 1.6) +
+          0.15 * Math.sin(7 * a + T * 1.9 + phase * 2.4);
+        const rr = R * (1 + wob * w);
+        const px = bx + Math.cos(a) * rr, py = by + Math.sin(a) * rr;
+        if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+    }
+    ctx.fillStyle = "#fff";
+    ctx.fill();
+  }
+
+  function drawRecordSymbol(ctx, record, targetRadius, t, hovered, seed) {
+    const amt = symbolHoverAmount(seed, hovered, t);
+    if (record.symbolBlobs && record.symbolBlobs.length) {
+      drawBlobSymbol(ctx, record.symbolBlobs, targetRadius, t, amt, seed);
+      return;
+    }
+    const pathStr = record.symbolPath;
+    const { flat, bounds } = getParsedSymbol(pathStr);
+    const bw = bounds.maxX - bounds.minX, bh = bounds.maxY - bounds.minY;
+    const half = Math.max(bw, bh) / 2 || 1;
+    const bcx = (bounds.minX + bounds.maxX) / 2, bcy = (bounds.minY + bounds.maxY) / 2;
+    const scale = targetRadius / half;
+
+    const T = t * AUX.SYMBOL_RIPPLE_SPEED;
+    const ph = seed * 0.9;
+
+    ctx.beginPath();
+    for (const sub of flat) {
+      let screenPts = sub.map(([x, y]) => [(x - bcx) * scale, (y - bcy) * scale]);
+      if (amt > 0.002) {
+        screenPts = screenPts.map((p) => {
+          const d = Math.hypot(p[0], p[1]) || 1e-6;
+          const nx = p[0] / d, ny = p[1] / d;
+          // 각도의 정수배 파동만 더하므로 윤곽을 한 바퀴 돌아도 이음매 없이 매끄럽다.
+          const a = Math.atan2(p[1], p[0]);
+          const wave =
+            0.55 * Math.sin(2 * a + T * 0.8 + ph) +
+            0.30 * Math.sin(3 * a - T * 1.15 + ph * 1.7) +
+            0.15 * Math.sin(5 * a + T * 0.55 + ph * 2.3);
+          const push = amt * wave * targetRadius * AUX.SYMBOL_RIPPLE_AMOUNT;
+          return [p[0] + nx * push, p[1] + ny * push];
+        });
+      }
+      appendSmoothClosedPath(ctx, screenPts);
+    }
+    ctx.fillStyle = "#fff";
+    ctx.fill("evenodd");
+  }
+
+  // =========================================================================
+  // 상태
+  // =========================================================================
+  let W = window.innerWidth, H = window.innerHeight;
+  let view = "records"; // "records" | "scene"
+  let searchQuery = "";
+  let hoveredCircle = -1;
+  let hoverAnimRunning = false;
+
+  const leftCanvasEl = document.getElementById("leftCanvas");
+  const rightCanvasEl = document.getElementById("rightCanvas");
+  const rightScrollEl = document.getElementById("rightScroll");
+  const searchInputEl = document.getElementById("searchInput");
+  const recordsViewEl = document.getElementById("recordsView");
+  const sceneCanvasEl = document.getElementById("sceneCanvas");
+
+  let leftCtx = null, rightCtx = null;
+  let lastLogoWidth = 0;
+  let rightCanvasW = 0, rightCanvasH = 0;
+  let circleLayout = []; // { cx, cy, r, index, record|null }
+
+  // =========================================================================
+  // 왼쪽 고정 패널: 로고 + 검색줄
+  // =========================================================================
+  function layoutLeftPanel() {
+    const leftW = Math.round(W * CONFIG.LEFT_PANEL_FRACTION);
+    leftCtx = setupCanvasDPR(leftCanvasEl, leftW, H);
+    drawLeftPanel();
+    positionSearchInput(leftW);
+  }
+
+  // 왼쪽 패널의 세로 흐름을 한 곳에서 계산한다.
+  // 로고 → by zeth → (3줄 띄움) → 정체성 문구 → 검색 바
+  function leftPanelMetrics(leftW) {
+    const marginX = leftW * 0.12;
+    const logoFontSize = H * CONFIG.FONT_SIZE_L_FRACTION;
+    const logoY = H * CONFIG.LOGO_TOP_FRACTION + logoFontSize;
+
+    const smallSize = Math.max(10, H * CONFIG.FONT_SIZE_S_FRACTION);
+    const byY = logoY + logoFontSize * 0.34;
+
+    const idSize = Math.max(11, H * CONFIG.IDENTITY_SIZE_FRACTION);
+    const idLine = idSize * CONFIG.IDENTITY_LINE_HEIGHT;
+    const idStartY = byY + smallSize * CONFIG.IDENTITY_GAP_LINES * 1.9 + idSize;
+    const idEndY = idStartY + idLine * (CONFIG.IDENTITY_WORDS.length - 1);
+
+    const searchY = idEndY + idLine * 1.9;
+    const iconSize = logoFontSize * 0.28;
+    const iconGap = iconSize * 0.55;
+
+    return { marginX, logoFontSize, logoY, smallSize, byY,
+             idSize, idLine, idStartY, searchY, iconSize, iconGap };
+  }
+
+  function positionSearchInput(leftW) {
+    const m = leftPanelMetrics(leftW);
+    const searchTotalW = lastLogoWidth * CONFIG.SEARCH_WIDTH_FRACTION;
+    const lineX0 = m.marginX + m.iconSize + m.iconGap;
+    const lineX1 = m.marginX + searchTotalW;
+
+    searchInputEl.style.left = lineX0 + "px";
+    searchInputEl.style.top = (m.searchY - Math.max(16, H * 0.02)) + "px";
+    searchInputEl.style.width = Math.max(10, lineX1 - lineX0) + "px";
+    searchInputEl.style.fontFamily = CONFIG.FONT_FAMILY;
+    searchInputEl.style.fontWeight = String(CONFIG.FONT_WEIGHT_REGULAR);
+    searchInputEl.style.fontSize = Math.max(13, H * CONFIG.FONT_SIZE_S_FRACTION * 1.2) + "px";
+  }
+
+  function drawLeftPanel() {
+    const ctx = leftCtx;
+    const leftW = W * CONFIG.LEFT_PANEL_FRACTION;
+    ctx.clearRect(0, 0, leftW, H);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, leftW, H);
+
+    const m = leftPanelMetrics(leftW);
+
+    // 사이트 타이틀 "LOUPE"
+    lastLogoWidth = drawLoupeLogo(ctx, m.marginX, m.logoY, m.logoFontSize);
+
+    // "by zeth" — 타이틀 바로 아래, 타이틀 오른쪽 끝에 맞춰 오른쪽 정렬
+    ctx.font = fontStr(m.smallSize, CONFIG.FONT_WEIGHT_REGULAR);
+    ctx.fillStyle = "#000";
+    ctx.textAlign = "right";
+    ctx.fillText("by zeth", m.marginX + lastLogoWidth, m.byY);
+
+    // 정체성 문구 — 연하고 조용하게, 한 줄에 하나씩
+    ctx.textAlign = "left";
+    ctx.font = fontStr(m.idSize, CONFIG.FONT_WEIGHT_REGULAR);
+    ctx.fillStyle = "rgba(0,0,0," + CONFIG.IDENTITY_OPACITY + ")";
+    for (let i = 0; i < CONFIG.IDENTITY_WORDS.length; i++) {
+      ctx.fillText(CONFIG.IDENTITY_WORDS[i], m.marginX, m.idStartY + m.idLine * i);
+    }
+
+    // 검색 바 — 아이콘 + 가는 선
+    const searchTotalW = lastLogoWidth * CONFIG.SEARCH_WIDTH_FRACTION;
+    const lineX0 = m.marginX + m.iconSize + m.iconGap;
+    const lineX1 = m.marginX + searchTotalW;
+    drawMagnifierIcon(ctx, m.marginX + m.iconSize * 0.5, m.searchY - m.iconSize * 0.15, m.iconSize);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(lineX0, m.searchY, Math.max(1, lineX1 - lineX0), Math.max(1, H * 0.0016));
+  }
+
+  // =========================================================================
+  // 오른쪽 스크롤 패널: 3×3 원 그리드
+  // =========================================================================
+  function totalSlotCount() {
+    const cols = CONFIG.GRID_COLS;
+    const minSlots = Math.max(9, RECORDS.length);
+    const rows = Math.ceil(minSlots / cols) + AUX.EMPTY_ROWS_BUFFER;
+    return rows * cols;
+  }
+
+  function layoutRightPanel() {
+    const leftW = Math.round(W * CONFIG.LEFT_PANEL_FRACTION);
+    rightScrollEl.style.left = leftW + "px";
+    rightScrollEl.style.width = (W - leftW) + "px";
+    rightCanvasW = W - leftW;
+
+    const cols = CONFIG.GRID_COLS;
+    const colW = rightCanvasW / cols;
+    const circleD = colW * CONFIG.CIRCLE_DIAMETER_FRACTION;
+    const labelSpace = circleD * CONFIG.ROW_LABEL_SPACE_FRACTION;
+    const rowH = circleD + labelSpace;
+    const topPad = colW * 0.35;
+    const slots = totalSlotCount();
+    const rows = slots / cols;
+    rightCanvasH = topPad * 2 + rows * rowH;
+
+    rightCtx = setupCanvasDPR(rightCanvasEl, rightCanvasW, rightCanvasH);
+
+    circleLayout = [];
+    for (let i = 0; i < slots; i++) {
+      const row = Math.floor(i / cols), col = i % cols;
+      const jitterX = seededJitter(i + 1, 3) * colW * 0.015;
+      const jitterY = seededJitter(i + 1, 7) * rowH * 0.015;
+      const cx = colW * col + colW / 2 + jitterX;
+      const cy = topPad + rowH * row + circleD / 2 + jitterY;
+      circleLayout.push({ cx, cy, r: circleD / 2, index: i, record: RECORDS[i] || null });
+    }
+
+    drawRightPanel();
+  }
+
+  function drawRightPanel() {
+    const ctx = rightCtx;
+    const now = performance.now() * 0.001;
+    ctx.clearRect(0, 0, rightCanvasW, rightCanvasH);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, rightCanvasW, rightCanvasH);
+
+    const q = searchQuery.trim().toLowerCase();
+
+    for (const c of circleLayout) {
+      if (!c.record) continue; // 비어있는 자리 — 아무것도 그리지 않음(완전한 흰 여백)
+
+      const matches = !q || c.record.title.toLowerCase().includes(q);
+      if (!matches) continue; // 검색과 맞지 않으면 그리지 않음(순수 흑백 규칙상 "흐리게" 대신 숨김)
+
+      const hovered = hoveredCircle === c.index;
+
+      // 검은 원 (미세하게 비정형, 곡률은 매끄럽게)
+      wobblyBlobPath(ctx, c.cx, c.cy, c.r, c.index * 3.1 + 1, CONFIG.SHAPE_WOBBLE_PX);
+      ctx.fillStyle = "#000";
+      ctx.fill();
+
+      // 흰색으로 파낸 상징 형태 — 일러스트레이터 SVG path 기반, 공통 로직으로 배치/변형
+      ctx.save();
+      ctx.translate(c.cx, c.cy);
+      drawRecordSymbol(ctx, c.record, c.r * 0.72, now, hovered, c.index * 7 + 1);
+      ctx.restore();
+
+      // 콘텐츠 제목 (원 아래) — 사이트 타이틀보다 훨씬 작고 가볍게
+      ctx.fillStyle = "#000";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      const titleY = c.cy + c.r + c.r * 0.42;
+      ctx.font = fontStr(Math.max(11, H * CONFIG.FONT_SIZE_M_FRACTION), CONFIG.FONT_WEIGHT_MEDIUM);
+      ctx.fillText(c.record.title, c.cx, titleY);
+
+      // 날짜 (제목보다 한 단계 더 작고 옅게 — 옅음은 굵기/크기만으로 표현, 색은 순수 검정 유지)
+      ctx.font = fontStr(Math.max(9, H * CONFIG.FONT_SIZE_S_FRACTION), CONFIG.FONT_WEIGHT_REGULAR);
+      ctx.fillText(c.record.date, c.cx, titleY + c.r * 0.3);
+    }
+  }
+
+  // 심볼은 가만히 있을 때도 아주 약하게 우글거리므로 루프를 계속 돌린다.
+  // (기록 화면을 벗어나면 그리지 않고 쉰다.)
+  function startHoverAnimIfNeeded() {
+    if (hoverAnimRunning) return;
+    hoverAnimRunning = true;
+    function tick() {
+      if (view === "records") drawRightPanel();
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // =========================================================================
+  // 입력 처리 (메인 화면)
+  // =========================================================================
+  searchInputEl.addEventListener("input", () => {
+    searchQuery = searchInputEl.value;
+    drawRightPanel();
+  });
+
+  rightCanvasEl.addEventListener("mousemove", (e) => {
+    const x = e.offsetX, y = e.offsetY;
+    let found = -1;
+    for (const c of circleLayout) {
+      if (c.record && Math.hypot(x - c.cx, y - c.cy) < c.r) { found = c.index; break; }
+    }
+    if (found !== hoveredCircle) {
+      hoveredCircle = found;
+      rightCanvasEl.style.cursor = found >= 0 ? "pointer" : "default";
+      if (found >= 0) startHoverAnimIfNeeded(); else drawRightPanel();
+    }
+  });
+  rightCanvasEl.addEventListener("mouseleave", () => {
+    if (hoveredCircle !== -1) { hoveredCircle = -1; drawRightPanel(); }
+  });
+  rightCanvasEl.addEventListener("click", (e) => {
+    const x = e.offsetX, y = e.offsetY;
+    for (const c of circleLayout) {
+      if (c.record && c.record.interactive && Math.hypot(x - c.cx, y - c.cy) < c.r) {
+        const leftW = Math.round(W * CONFIG.LEFT_PANEL_FRACTION);
+        enterInteractionScreen(c.record, { x: leftW + x, y: y - rightScrollEl.scrollTop });
+        break;
+      }
+    }
+  });
+
+  // =========================================================================
+  // 인터랙션 화면 — 둥근 모서리 4:3 프레임 + 세포. 머무름 인식/부풀기/이웃 압박/정지 시
+  // 완전한 고요는 그대로 두고, 그 위에 커서 속도에 반응하는 즉시 번짐 효과를 더한다.
+  // =========================================================================
+  let sceneCtx = null;
+  let currentRecord = null;
+  let transitionRunning = false;
+  let transitionStart = 0;
+  let transitionClickPt = { x: 0, y: 0 };
+
+  let sites = [];
+  let frame = null;
+  let frameAnchors = [];
+  let interactionVoronoi = null;
+  let lastT = performance.now();
+  let hoverIndex = -1, dwellTimer = 0, activeCellIndex = -1;
+  let prevPX = null, prevPY = null;
+  let lastPointerSpeed = 0;
+  const scenePointer = { x: -9999, y: -9999, onScreen: false };
+  let returnHitBox = null;
+
+  function generateFrameShape() {
+    const marginSide = Math.min(W, H) * CONFIG.FRAME_MARGIN_FRACTION;
+    // 갤러리 캡션처럼: 위쪽 여백은 살짝 작게, 아래쪽엔 제목 자리를 남겨서
+    // 프레임+제목 전체가 광학적으로 화면 중앙에 놓인 것처럼 보이게 한다.
+    const marginTop = marginSide * CONFIG.FRAME_OPTICAL_TOP_FACTOR;
+    const bottomReserve = CONFIG.INTERACTION_TITLE_GAP_PX + CONFIG.INTERACTION_TITLE_PX * 1.6 + marginSide * 0.5;
+
+    const availW = W - marginSide * 2;
+    const availH = H - marginTop - bottomReserve;
+    let w, h;
+    if (availW / availH > CONFIG.FRAME_ASPECT) { h = availH; w = h * CONFIG.FRAME_ASPECT; }
+    else { w = availW; h = w / CONFIG.FRAME_ASPECT; }
+    const x = (W - w) / 2;
+    const y = marginTop + (availH - h) / 2;
+    const cx = W / 2, cy = y + h / 2;
+    const r = Math.min(w, h) * CONFIG.FRAME_CORNER_FRACTION;
+
+    const bw = CONFIG.FRAME_BORDER_PX;
+    const ix = x + bw, iy = y + bw, iw = Math.max(10, w - bw * 2), ih = Math.max(10, h - bw * 2);
+    const ir = Math.max(2, r - bw);
+    const pts = sampleRoundedRectBoundary(ix, iy, iw, ih, ir, AUX.FRAME_SAMPLES);
+    return { x, y, w, h, r, ix, iy, iw, ih, ir, pts, cx, cy };
+  }
+
   function generateSeedPoints(framePts) {
     const n = CONFIG.CELL_COUNT;
     const area = polygonArea(framePts);
     const avgR = Math.sqrt(area / n / Math.PI);
     const bbox = polyBounds(framePts);
     const list = [];
-    const maxAttempts = n * 120;
-    const powExp = 1 + CONFIG.SIZE_VARIATION * 7;               // 클수록 작은 반지름 쪽으로 강하게 쏠림
-    const ceilingMul = 3.5 * (0.3 + CONFIG.SIZE_VARIATION * 1.3); // 클수록 큰 세포의 상한도 훨씬 커짐
+    const maxAttempts = n * 150;
+    const powExp = 1 + CONFIG.SIZE_VARIATION * 7;
+    const ceilingMul = 3.5 * (0.3 + CONFIG.SIZE_VARIATION * 1.3);
     let attempts = 0;
     while (list.length < n && attempts < maxAttempts) {
       attempts++;
@@ -296,54 +1028,7 @@
       }
       if (ok) list.push({ x, y, r });
     }
-    return { list, avgR, bbox };
-  }
-
-  function addEdgeClusterCells(list, framePts, cx, cy, R0, avgR, bbox) {
-    let added = 0, attempts = 0;
-    const maxAttempts = AUX.EDGE_SMALL_CELL_COUNT * 80;
-    while (added < AUX.EDGE_SMALL_CELL_COUNT && attempts < maxAttempts) {
-      attempts++;
-      const x = bbox.minX + Math.random() * (bbox.maxX - bbox.minX);
-      const y = bbox.minY + Math.random() * (bbox.maxY - bbox.minY);
-      if (!pointInPolygon([x, y], framePts)) continue;
-      const edgeCloseness = Math.hypot(x - cx, y - cy) / R0;
-      if (edgeCloseness < 1 - AUX.EDGE_BAND_FRACTION) continue;
-      const r = avgR * lerp(AUX.EDGE_SMALL_RADIUS_FACTOR[0], AUX.EDGE_SMALL_RADIUS_FACTOR[1], Math.random());
-      let ok = true;
-      for (const p of list) {
-        const dx = p.x - x, dy = p.y - y;
-        const minD = (p.r + r) * 0.6;
-        if (dx * dx + dy * dy < minD * minD) { ok = false; break; }
-      }
-      if (ok) { list.push({ x, y, r }); added++; }
-    }
-  }
-
-  // 이미 놓인 큰 세포들 옆에 작은 위성 세포를 붙여서, 나중에 그 접합부 근처에
-  // 작은 세포 무리가 생기도록 유도한다.
-  function addJunctionSatellites(list, framePts, avgR) {
-    const bigOnes = list.filter((p) => p.r > avgR * 1.3);
-    let added = 0;
-    for (const big of bigOnes) {
-      if (added >= AUX.JUNCTION_SATELLITE_COUNT) break;
-      const satCount = 1 + Math.floor(Math.random() * 2);
-      for (let s = 0; s < satCount && added < AUX.JUNCTION_SATELLITE_COUNT; s++) {
-        const theta = Math.random() * Math.PI * 2;
-        const r = avgR * lerp(AUX.EDGE_SMALL_RADIUS_FACTOR[0], AUX.EDGE_SMALL_RADIUS_FACTOR[1], Math.random());
-        const d = big.r + r * 1.1;
-        const x = big.x + Math.cos(theta) * d;
-        const y = big.y + Math.sin(theta) * d;
-        if (!pointInPolygon([x, y], framePts)) continue;
-        let ok = true;
-        for (const p of list) {
-          const dx = p.x - x, dy = p.y - y;
-          const minD = (p.r + r) * 0.55;
-          if (dx * dx + dy * dy < minD * minD) { ok = false; break; }
-        }
-        if (ok) { list.push({ x, y, r }); added++; }
-      }
-    }
+    return { list, avgR };
   }
 
   function relax(list, iterations, bounds, avgR) {
@@ -355,8 +1040,8 @@
         const poly = vor.cellPolygon(i);
         if (!poly) continue;
         const c = polygonCentroid(normalizePoly(poly));
-        const sizeFactor = clamp(pts[i].r / (avgR * 2.4), 0, 1); // 클수록 1에 가까움 → 덜 이완됨
-        const relaxAmt = AUX.LLOYD_STRENGTH * (1 - sizeFactor * 0.75);
+        const sizeFactor = clamp(pts[i].r / (avgR * 2.4), 0, 1);
+        const relaxAmt = 0.5 * (1 - sizeFactor * 0.75);
         pts[i].x += (c[0] - pts[i].x) * relaxAmt;
         pts[i].y += (c[1] - pts[i].y) * relaxAmt;
         pts[i].x = clamp(pts[i].x, bounds[0] + 2, bounds[2] - 2);
@@ -366,20 +1051,15 @@
     return pts;
   }
 
-  function initSites() {
-    const bounds = [0, 0, W, H];
+  function initInteractionSites() {
     frame = generateFrameShape();
     frameAnchors = frame.pts.map(([x, y]) => ({ x, y }));
-    frameR0 = Math.sqrt(frame.w * frame.h) / 2;
 
-    const { list, avgR, bbox } = generateSeedPoints(frame.pts);
-    addEdgeClusterCells(list, frame.pts, frame.cx, frame.cy, Math.min(frame.w, frame.h) / 2, avgR, bbox);
-    addJunctionSatellites(list, frame.pts, avgR);
-
+    const { list, avgR } = generateSeedPoints(frame.pts);
     const before = list.map((p) => ({ x: p.x, y: p.y, r: p.r }));
-    const relaxed = relax(before, AUX.LLOYD_ITERATIONS, bounds, avgR);
+    const bounds = [0, 0, W, H];
+    const relaxed = relax(before, 2, bounds, avgR);
 
-    // 이완 후 프레임 밖으로 나간 점은 이완 전 위치로 되돌리는 안전장치
     for (let i = 0; i < relaxed.length; i++) {
       if (!pointInPolygon([relaxed[i].x, relaxed[i].y], frame.pts)) {
         relaxed[i].x = before[i].x;
@@ -393,13 +1073,14 @@
       x: p.x, y: p.y,
       vx: 0, vy: 0,
       pushX: 0, pushY: 0,
-      amt: 0, ampVel: 0,
+      amt: 0, growing: false, amtPhaseStart: 0, amtPhaseStartValue: 0,
+      bleedAmt: 0, bleedGrowing: false, bleedPhaseStart: 0, bleedPhaseStartValue: 0,
+      bleedColor: CONFIG.NEON_PALETTE[0],
       seed: Math.random() * 1000,
       baseArea: Math.PI * avgR * avgR,
       baseRadius: avgR,
     }));
 
-    // 기준(원래) 면적을 실제 정착된 다이어그램(프레임 경계 고정점 포함)에서 측정
     const combined = sites.concat(frameAnchors);
     const del = d3.Delaunay.from(combined, (s) => s.x, (s) => s.y);
     const vor = del.voronoi(bounds);
@@ -407,44 +1088,18 @@
       const poly = vor.cellPolygon(i);
       if (poly) {
         const a = polygonArea(poly);
-        if (a > 1) {
-          sites[i].baseArea = a;
-          sites[i].baseRadius = Math.sqrt(a / Math.PI);
-        }
+        if (a > 1) { sites[i].baseArea = a; sites[i].baseRadius = Math.sqrt(a / Math.PI); }
       }
     }
 
-    hoverIndex = -1; dwellTimer = 0; activeCellIndex = -1;
-    tensionSlots = [];
+    hoverIndex = -1; dwellTimer = 0; activeCellIndex = -1; prevPX = null; prevPY = null;
   }
 
-  function resize() {
-    DPR = Math.min(window.devicePixelRatio || 1, 2);
-    W = window.innerWidth;
-    H = window.innerHeight;
-    canvas.width = W * DPR;
-    canvas.height = H * DPR;
-    canvas.style.width = W + "px";
-    canvas.style.height = H + "px";
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    initSites();
+  function buildInteractionVoronoi() {
+    const combined = sites.concat(frameAnchors);
+    const delaunay = d3.Delaunay.from(combined, (s) => s.x, (s) => s.y);
+    return delaunay.voronoi([0, 0, W, H]);
   }
-
-  // =========================================================================
-  // 포인터
-  // =========================================================================
-  function setPointer(x, y) { pointer.x = x; pointer.y = y; pointer.onScreen = true; }
-  window.addEventListener("mousemove", (e) => setPointer(e.clientX, e.clientY));
-  window.addEventListener("touchmove", (e) => {
-    if (e.touches[0]) setPointer(e.touches[0].clientX, e.touches[0].clientY);
-  }, { passive: true });
-  window.addEventListener("touchstart", (e) => {
-    if (e.touches[0]) setPointer(e.touches[0].clientX, e.touches[0].clientY);
-  }, { passive: true });
-  document.addEventListener("mouseleave", () => { pointer.onScreen = false; });
-  window.addEventListener("touchend", () => { pointer.onScreen = false; });
-  window.addEventListener("touchcancel", () => { pointer.onScreen = false; });
-  window.addEventListener("resize", resize);
 
   function nearestSiteIndex(px, py) {
     let best = -1, bestD = Infinity;
@@ -457,196 +1112,93 @@
   }
 
   function updateHoverAndDwell(dt) {
-    if (!pointer.onScreen || sites.length === 0) {
-      hoverIndex = -1; dwellTimer = 0; activeCellIndex = -1; prevFrameX = null;
+    if (!scenePointer.onScreen || sites.length === 0) {
+      hoverIndex = -1; dwellTimer = 0; activeCellIndex = -1; prevPX = null; lastPointerSpeed = 0;
       return;
     }
-    const speed = (prevFrameX === null) ? 0 : Math.hypot(pointer.x - prevFrameX, pointer.y - prevFrameY) / Math.max(dt, 0.0001);
-    prevFrameX = pointer.x; prevFrameY = pointer.y;
+    const speed = (prevPX === null) ? 0 : Math.hypot(scenePointer.x - prevPX, scenePointer.y - prevPY) / Math.max(dt, 0.0001);
+    prevPX = scenePointer.x; prevPY = scenePointer.y;
+    lastPointerSpeed = speed;
 
-    const nh = nearestSiteIndex(pointer.x, pointer.y);
+    const nh = nearestSiteIndex(scenePointer.x, scenePointer.y);
     if (nh !== hoverIndex) {
       hoverIndex = nh;
       dwellTimer = 0;
-    } else if (speed < CONFIG.STILL_SPEED_PX_S) {
-      dwellTimer += dt * 1000;
-    } else {
-      dwellTimer = 0;
+      // 새로 올라온 세포마다 네온 팔레트에서 무작위로 하나 골라 다음 번짐 색으로 쓴다
+      if (nh >= 0) {
+        sites[nh].bleedColor = CONFIG.NEON_PALETTE[Math.floor(Math.random() * CONFIG.NEON_PALETTE.length)];
+      }
     }
+    else if (speed < CONFIG.STILL_SPEED_PX_S) { dwellTimer += dt * 1000; }
+    else { dwellTimer = 0; }
     activeCellIndex = (dwellTimer >= CONFIG.ARRIVAL_DWELL_MS) ? hoverIndex : -1;
   }
 
-  // =========================================================================
-  // 자발적 "긴장" 이벤트 — 가끔 세포 하나가 스스로 부풀었다 풀림
-  // =========================================================================
-  function updateTension(now) {
-    if (now >= nextTensionAt && tensionSlots.length < AUX.TENSION_MAX_CONCURRENT && sites.length > 0) {
-      const busy = new Set(tensionSlots.map((s) => s.siteIndex));
-      busy.add(activeCellIndex);
-      let idx = -1;
-      for (let tries = 0; tries < 10; tries++) {
-        const cand = Math.floor(Math.random() * sites.length);
-        if (!busy.has(cand)) { idx = cand; break; }
-      }
-      if (idx >= 0) tensionSlots.push({ siteIndex: idx, phase: "rise", phaseStart: now });
-      nextTensionAt = now + CONFIG.TENSION_PERIOD_MS * (0.5 + Math.random());
-    }
-
-    const riseDur = CONFIG.GROW_MS * AUX.TENSION_RISE_MULT;
-    const fallDur = CONFIG.SINK_MS * AUX.TENSION_FALL_MULT;
-    for (let i = tensionSlots.length - 1; i >= 0; i--) {
-      const slot = tensionSlots[i];
-      const elapsed = now - slot.phaseStart;
-      if (slot.phase === "rise" && elapsed >= riseDur) { slot.phase = "hold"; slot.phaseStart = now; }
-      else if (slot.phase === "hold" && elapsed >= AUX.TENSION_HOLD_MS) { slot.phase = "fall"; slot.phaseStart = now; }
-      else if (slot.phase === "fall" && elapsed >= fallDur) { tensionSlots.splice(i, 1); }
-    }
+  // 세포가 다 부풀었을 때 목표 면적 배율 — 프레임 내부 면적의 일정 비율(약 1/3)까지 자랄 수 있게,
+  // 세포마다 자기 기준 면적에 맞춰 계산한다(작은 세포일수록 배율 자체는 커짐).
+  function siteEffectiveMult(site) {
+    const frameArea = frame.iw * frame.ih;
+    const capMult = (frameArea * CONFIG.MAX_CELL_FRAME_FRACTION) / site.baseArea;
+    return Math.min(CONFIG.INFLATE_AREA_MULT_CAP, Math.max(1.5, capMult));
   }
 
-  function tensionTargetForSite(idx) {
-    for (const slot of tensionSlots) {
-      if (slot.siteIndex === idx) return slot.phase === "fall" ? 0 : AUX.TENSION_TARGET_AMT;
-    }
-    return 0;
-  }
-
-  // =========================================================================
-  // 물리 업데이트
-  // =========================================================================
-  const SPRING_K = 0.14; // 위치 복귀 스프링
-  const DAMPING = 0.78;
-
-  // 활성(부풀거나 긴장 중인) 세포들이 주변에 미치는 압력을 한 점(hx,hy)에서 합산한다.
-  function computePush(hx, hy, pushers) {
-    let px = 0, py = 0;
-    for (const p of pushers) {
-      const dx = hx - p.hx, dy = hy - p.hy;
-      const d = Math.hypot(dx, dy) || 0.0001;
-      if (d < p.influenceR) {
-        const falloff = 0.5 * (1 + Math.cos((Math.PI * d) / p.influenceR));
-        const push = falloff * p.maxPush;
-        px += (dx / d) * push;
-        py += (dy / d) * push;
-      }
-    }
-    return [px, py];
-  }
-
-  function updatePhysics(dt, now, t) {
+  function updateInteractionPhysics(dt, now) {
     updateHoverAndDwell(dt);
-    updateTension(now);
 
     for (let i = 0; i < sites.length; i++) {
-      const target = (i === activeCellIndex) ? 1 : tensionTargetForSite(i);
-      updateAmt(sites[i], target, dt);
+      updateSiteAmt(sites[i], i === activeCellIndex, now);
     }
 
-    // 압력을 가하는 세포 목록 — 영향 범위는 세포 자기 크기가 아니라 프레임 전체 크기 기준
     const pushers = [];
     for (const s of sites) {
       const amt = Math.max(0, s.amt);
       if (amt < 0.02) continue;
+      const mult = siteEffectiveMult(s);
       pushers.push({
         hx: s.hx, hy: s.hy,
-        influenceR: Math.max(1, frameR0 * CONFIG.PUSH_RANGE_FRACTION),
-        maxPush: (Math.sqrt(CONFIG.INFLATE_AREA_MULT) - 1) * s.baseRadius * Math.min(amt, 1.3),
+        influenceR: Math.max(1, Math.min(frame.iw, frame.ih) * CONFIG.PUSH_RANGE_FRACTION),
+        maxPush: (Math.sqrt(mult) - 1) * s.baseRadius * Math.min(amt, 1.3),
       });
     }
 
     for (const s of sites) {
       const [px, py] = computePush(s.hx, s.hy, pushers);
       s.pushX = px; s.pushY = py;
-    }
-
-    for (const s of sites) {
-      const bt = t * CONFIG.BREATHE_SPEED;
-      const breatheX = (noise1(s.seed + bt) * 2 - 1) * AUX.BREATHE_AMPLITUDE;
-      const breatheY = (noise1(s.seed + 500 + bt) * 2 - 1) * AUX.BREATHE_AMPLITUDE;
-      const tremble = Math.max(0, s.amt) * AUX.TREMBLE_EXTRA_JITTER;
-      const trembleX = tremble * (noise1(s.seed + 900 + t * 3) * 2 - 1);
-      const trembleY = tremble * (noise1(s.seed + 1400 + t * 3) * 2 - 1);
-
-      const targetX = s.hx + breatheX + trembleX + s.pushX;
-      const targetY = s.hy + breatheY + trembleY + s.pushY;
-
-      const ax = (targetX - s.x) * SPRING_K;
-      const ay = (targetY - s.y) * SPRING_K;
-      s.vx = (s.vx + ax) * DAMPING;
-      s.vy = (s.vy + ay) * DAMPING;
+      const targetX = s.hx + s.pushX, targetY = s.hy + s.pushY;
+      const ax = (targetX - s.x) * AUX.SPRING_K, ay = (targetY - s.y) * AUX.SPRING_K;
+      s.vx = (s.vx + ax) * AUX.DAMPING;
+      s.vy = (s.vy + ay) * AUX.DAMPING;
       s.x += s.vx;
       s.y += s.vy;
     }
+
+    // 번짐(물감) 갱신 — 머무름과 무관하게 즉시 반응, 커서 속도로 도달 깊이가 달라진다.
+    // 팽창(amt)과 같은 ease-out 곡선을 공유해서 하나의 움직임처럼 보이게 한다.
+    const speedNorm = clamp((lastPointerSpeed / AUX.BLEED_REFERENCE_SPEED) * CONFIG.BLEED_VELOCITY_SENSITIVITY, 0, 1);
+    const depthTarget = lerp(1, AUX.BLEED_MIN_DEPTH, speedNorm);
+    for (let i = 0; i < sites.length; i++) {
+      const s = sites[i];
+      const isHover = scenePointer.onScreen && i === hoverIndex;
+      if (isHover !== s.bleedGrowing) {
+        s.bleedGrowing = isHover;
+        s.bleedPhaseStart = now;
+        s.bleedPhaseStartValue = s.bleedAmt;
+      }
+      const durationMs = isHover ? CONFIG.BLEED_RISE_MS : CONFIG.BLEED_FALL_MS;
+      const elapsedSec = (now - s.bleedPhaseStart) / 1000;
+      const p = easeOutPower(elapsedSec / (durationMs / 1000), CONFIG.INTERACTION_EASE_POWER);
+      const target = isHover ? depthTarget : 0;
+      s.bleedAmt = lerp(s.bleedPhaseStartValue, target, p);
+    }
   }
 
-  // =========================================================================
-  // 렌더링: 검은 잉크 프레임 위에, 안쪽으로 살짝 줄인(inset) 오프화이트 젤리 세포를 얹는다.
-  // 접합부의 고임은 별도로 그리지 않고, 큰 모서리 곡률이 겹치는 결과로만 생기게 한다.
-  // =========================================================================
-
-  // 볼록 다각형을 각 변마다 다른 거리(insetArr)만큼 안쪽으로 평행 이동시켜 축소한다.
-  function insetPolygon(pts, insetArr) {
-    const n = pts.length;
-    if (n < 3) return pts;
-    let signedArea2 = 0;
-    for (let i = 0; i < n; i++) {
-      const [x0, y0] = pts[i], [x1, y1] = pts[(i + 1) % n];
-      signedArea2 += x0 * y1 - x1 * y0;
-    }
-    const sign = signedArea2 >= 0 ? 1 : -1;
-
-    const offsetLines = [];
-    for (let i = 0; i < n; i++) {
-      const p1 = pts[i], p2 = pts[(i + 1) % n];
-      let dx = p2[0] - p1[0], dy = p2[1] - p1[1];
-      const len = Math.hypot(dx, dy) || 1e-6;
-      dx /= len; dy /= len;
-      const nx = sign > 0 ? -dy : dy;
-      const ny = sign > 0 ? dx : -dx;
-      const d = insetArr[i];
-      offsetLines.push({ px: p1[0] + nx * d, py: p1[1] + ny * d, dx, dy });
-    }
-
-    const result = [];
-    for (let i = 0; i < n; i++) {
-      const a = offsetLines[(i - 1 + n) % n];
-      const b = offsetLines[i];
-      const denom = a.dx * b.dy - a.dy * b.dx;
-      if (Math.abs(denom) < 1e-9) { result.push([b.px, b.py]); continue; }
-      const tt = ((b.px - a.px) * b.dy - (b.py - a.py) * b.dx) / denom;
-      result.push([a.px + a.dx * tt, a.py + a.dy * tt]);
-    }
-    return result;
-  }
-
-  // 다각형의 각 모서리를, 인접한 변 길이에 비례하는(cornerFrac) 큰 곡률로 둥글려
-  // 현재 캔버스 경로에 만든다. cornerFrac이 1에 가까울수록 변의 대부분이 곡선으로 채워져
-  // 젤리처럼 뭉친 모양이 되고, 이웃 세포와 만나는 자리에는 곡선 삼각형(Plateau border)이 저절로 남는다.
-  function buildJellyPolygon(pts, cornerFrac) {
-    const n = pts.length;
-    if (n < 3) { ctx.beginPath(); return; }
-    ctx.beginPath();
-    for (let i = 0; i < n; i++) {
-      const prev = pts[(i - 1 + n) % n];
-      const cur = pts[i];
-      const next = pts[(i + 1) % n];
-      const toPrev = vNorm(vSub(prev, cur));
-      const toNext = vNorm(vSub(next, cur));
-      const r = cornerFrac * Math.min(vDist(prev, cur), vDist(cur, next)) * 0.48;
-      const a = [cur[0] + toPrev[0] * r, cur[1] + toPrev[1] * r];
-      const b = [cur[0] + toNext[0] * r, cur[1] + toNext[1] * r];
-      if (i === 0) ctx.moveTo(a[0], a[1]); else ctx.lineTo(a[0], a[1]);
-      ctx.quadraticCurveTo(cur[0], cur[1], b[0], b[1]);
-    }
-    ctx.closePath();
-  }
-
-  function drawCell(site, rawPoly) {
+  function drawInteractionCell(ctx, site, rawPoly) {
     const pts = normalizePoly(rawPoly);
     if (pts.length < 3) return;
 
     const area = polygonArea(rawPoly);
     const ratio = area / site.baseArea;
-    const inflateNorm = mapRange(ratio, 1, CONFIG.INFLATE_AREA_MULT, 0, 1, true);
+    const inflateNorm = mapRange(ratio, 1, siteEffectiveMult(site), 0, 1, true);
     const compressNorm = mapRange(ratio, 1, 0.35, 0, 1, true);
 
     const midInset = (CONFIG.INSET_RANGE_PX[0] + CONFIG.INSET_RANGE_PX[1]) / 2;
@@ -659,9 +1211,7 @@
       ? lerp(midCorner, CONFIG.CELL_CORNER_RANGE[0], inflateNorm)
       : lerp(midCorner, CONFIG.CELL_CORNER_RANGE[1], compressNorm);
 
-    // 세포 크기에 비해 값이 너무 크면 도형이 뒤집히므로 안전하게 제한
     const safeCap = Math.sqrt(area / Math.PI) * 0.46;
-
     const n = pts.length;
     const insets = new Array(n);
     for (let e = 0; e < n; e++) {
@@ -669,63 +1219,197 @@
       insets[e] = Math.min(baseInset * jitter, safeCap);
     }
 
-    const inner = insetPolygon(pts, insets);
+    let inner = insetPolygon(pts, insets);
     if (inner.length < 3) return;
+    // 아주 짧은 변이 하나라도 있으면 그 지점만 반경이 찌그러져 각져 보이므로,
+    // 둥글리기 전에 짧은 변의 두 점을 하나로 합쳐 제거한다.
+    inner = simplifyForRounding(inner, Math.sqrt(area / Math.PI) * 0.07);
 
-    buildJellyPolygon(inner, cornerFrac);
-    ctx.fillStyle = AUX.BG_COLOR;
+    buildJellyPolygon(ctx, inner, cornerFrac);
+    ctx.fillStyle = "#fff";
     ctx.fill();
+
+    if (site.bleedAmt > 0.01) {
+      ctx.save();
+      buildJellyPolygon(ctx, inner, cornerFrac);
+      ctx.clip();
+      let cx = 0, cy = 0;
+      for (const p of inner) { cx += p[0]; cy += p[1]; }
+      cx /= inner.length; cy /= inner.length;
+      const rApprox = Math.sqrt(area / Math.PI);
+      ctx.beginPath();
+      ctx.arc(cx, cy, rApprox * 1.4 * site.bleedAmt, 0, Math.PI * 2);
+      ctx.fillStyle = site.bleedColor;
+      ctx.fill();
+      ctx.restore();
+    }
   }
 
-  function render(voronoi) {
-    ctx.fillStyle = AUX.BG_COLOR;
+  // 프레임 바로 아래, 갤러리 캡션처럼 — 굵게, 자간을 살짝 넓혀서
+  function drawInteractionTitle(ctx) {
+    const text = currentRecord ? currentRecord.title : "";
+    const fontPx = CONFIG.INTERACTION_TITLE_PX;
+    const spacing = CONFIG.INTERACTION_TITLE_LETTER_SPACING_PX;
+    ctx.font = fontStr(fontPx, CONFIG.FONT_WEIGHT_BOLD);
+    ctx.fillStyle = "#000";
+    ctx.textBaseline = "alphabetic";
+
+    let totalW = -spacing;
+    for (const ch of text) totalW += ctx.measureText(ch).width + spacing;
+
+    const y = frame.y + frame.h + CONFIG.INTERACTION_TITLE_GAP_PX + fontPx;
+    let cursor = W / 2 - totalW / 2;
+    ctx.textAlign = "left";
+    for (const ch of text) {
+      ctx.fillText(ch, cursor, y);
+      cursor += ctx.measureText(ch).width + spacing;
+    }
+  }
+
+  // 왼쪽 위 구석의 보조 버튼 — 평소엔 조용한 텍스트만, 커서를 올렸을 때만 진해진다(채워진 알약)
+  function drawReturnButton(ctx) {
+    const pad = CONFIG.BACK_BUTTON_PAD_PX;
+    const label = "← back";
+    const fontPx = CONFIG.BACK_BUTTON_FONT_PX;
+    ctx.font = fontStr(fontPx, CONFIG.FONT_WEIGHT_REGULAR);
+    const textW = ctx.measureText(label).width;
+    const padX = fontPx * 1.0, padY = fontPx * 0.75;
+    const w = textW + padX * 2, h = fontPx + padY * 2;
+    returnHitBox = { x: pad, y: pad, w, h };
+
+    const hovered = scenePointer.onScreen &&
+      scenePointer.x >= pad && scenePointer.x <= pad + w &&
+      scenePointer.y >= pad && scenePointer.y <= pad + h;
+
+    if (hovered) {
+      const r = h / 2;
+      ctx.beginPath();
+      ctx.moveTo(pad + r, pad);
+      ctx.lineTo(pad + w - r, pad);
+      ctx.arcTo(pad + w, pad, pad + w, pad + r, r);
+      ctx.arcTo(pad + w, pad + h, pad + w - r, pad + h, r);
+      ctx.lineTo(pad + r, pad + h);
+      ctx.arcTo(pad, pad + h, pad, pad + h - r, r);
+      ctx.arcTo(pad, pad, pad + r, pad, r);
+      ctx.closePath();
+      ctx.fillStyle = "#000";
+      ctx.fill();
+      ctx.fillStyle = "#fff";
+    } else {
+      ctx.fillStyle = "#000";
+    }
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, pad + w / 2, pad + h / 2 + 1);
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left";
+  }
+
+  function renderInteractionContent() {
+    const ctx = sceneCtx;
+    ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, W, H);
 
-    // 프레임 = 검은 잉크 베이스
-    roundedRectPath(frame);
-    ctx.fillStyle = `rgb(${CONFIG.INK_COLOR})`;
+    roundedRectPath(ctx, frame.x, frame.y, frame.w, frame.h, frame.r);
+    ctx.fillStyle = "#000";
     ctx.fill();
 
-    // 이후 그리는 모든 세포는 프레임 밖으로 새지 않도록 클립
     ctx.save();
-    roundedRectPath(frame);
+    roundedRectPath(ctx, frame.x, frame.y, frame.w, frame.h, frame.r);
     ctx.clip();
-
     for (let i = 0; i < sites.length; i++) {
-      const poly = voronoi.cellPolygon(i);
+      const poly = interactionVoronoi.cellPolygon(i);
       if (!poly) continue;
-      drawCell(sites[i], poly);
+      drawInteractionCell(ctx, sites[i], poly);
     }
-
     ctx.restore();
+
+    drawInteractionTitle(ctx);
+    drawReturnButton(ctx);
   }
 
-  // =========================================================================
-  // 메인 루프
-  // =========================================================================
-  let hintHidden = false;
-  function loop(now) {
+  function enterInteractionScreen(record, clickPt) {
+    view = "transition";
+    currentRecord = record;
+    transitionClickPt = clickPt;
+    transitionStart = performance.now();
+    recordsViewEl.hidden = true;
+    sceneCanvasEl.hidden = false;
+    sceneCtx = setupCanvasDPR(sceneCanvasEl, W, H);
+    initInteractionSites();
+    lastT = performance.now();
+    if (!transitionRunning) {
+      transitionRunning = true;
+      requestAnimationFrame(sceneLoop);
+    }
+  }
+
+  function sceneLoop(now) {
+    if (view !== "transition" && view !== "scene") { transitionRunning = false; return; }
     const dt = Math.min((now - lastT) / 1000, 0.05);
     lastT = now;
-    const t = now / 1000;
 
-    updatePhysics(dt, now, t);
+    updateInteractionPhysics(dt, now);
+    interactionVoronoi = buildInteractionVoronoi();
 
-    const combined = sites.concat(frameAnchors);
-    const delaunay = d3.Delaunay.from(combined, (s) => s.x, (s) => s.y);
-    const voronoi = delaunay.voronoi([0, 0, W, H]);
-    render(voronoi);
-
-    if (!hintHidden && activeCellIndex >= 0) {
-      hintHidden = true;
-      hintEl.style.opacity = 0;
+    if (view === "transition") {
+      const p = clamp((now - transitionStart) / CONFIG.TRANSITION_MS, 0, 1);
+      const e = easeInOutCubic(p);
+      const maxR = Math.hypot(W, H);
+      sceneCtx.fillStyle = "#fff";
+      sceneCtx.fillRect(0, 0, W, H);
+      sceneCtx.save();
+      sceneCtx.beginPath();
+      sceneCtx.arc(transitionClickPt.x, transitionClickPt.y, lerp(10, maxR, e), 0, Math.PI * 2);
+      sceneCtx.clip();
+      renderInteractionContent();
+      sceneCtx.restore();
+      if (p >= 1) view = "scene";
+    } else {
+      renderInteractionContent();
     }
 
-    requestAnimationFrame(loop);
+    requestAnimationFrame(sceneLoop);
   }
 
-  resize();
-  requestAnimationFrame(loop);
+  window.addEventListener("mousemove", (e) => {
+    if (view !== "scene" && view !== "transition") return;
+    scenePointer.x = e.clientX; scenePointer.y = e.clientY; scenePointer.onScreen = true;
+  });
+  sceneCanvasEl.addEventListener("mouseleave", () => { scenePointer.onScreen = false; });
+  sceneCanvasEl.addEventListener("click", (e) => {
+    if (view !== "scene" || !returnHitBox) return;
+    const x = e.offsetX, y = e.offsetY;
+    if (x >= returnHitBox.x && x <= returnHitBox.x + returnHitBox.w && y >= returnHitBox.y && y <= returnHitBox.y + returnHitBox.h) {
+      returnToRecords();
+    }
+  });
+
+  function returnToRecords() {
+    view = "records";
+    scenePointer.onScreen = false;
+    sceneCanvasEl.hidden = true;
+    recordsViewEl.hidden = false;
+  }
+
+  // =========================================================================
+  // 리사이즈 / 시작
+  // =========================================================================
+  function layoutAll() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    layoutLeftPanel();
+    layoutRightPanel();
+    if ((view === "scene" || view === "transition") && !sceneCanvasEl.hidden) {
+      setupCanvasDPR(sceneCanvasEl, W, H);
+      initInteractionSites();
+    }
+  }
+  window.addEventListener("resize", layoutAll);
+
+  layoutAll();
+  startHoverAnimIfNeeded();
 })();
 </script>
 </body>
